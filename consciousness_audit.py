@@ -29,17 +29,22 @@ Extracts 8 dimensions per paper using Gemini LLM.
 # ║  Set your API key and output folder below before running                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-# Your Gemini API Key (get one at https://aistudio.google.com/app/apikey)
-GEMINI_API_KEY = ""  # <-- PASTE YOUR API KEY HERE
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
 
-# Output folder for saving results
-OUTPUT_FOLDER = "./results"  # Local folder
+load_dotenv() 
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Google Drive folder path for saving outputs (will be created if doesn't exist)
+GDRIVE_OUTPUT_FOLDER = "./results"
 
 # Path to your bibliography CSV file
 CSV_PATH = "cons_bib.csv"  # Update if your file is elsewhere
 
 # Gemini model to use
-GEMINI_MODEL = "gemini-2.0-flash"  # or "gemini-1.5-flash", "gemini-1.5-pro"
+GEMINI_MODEL = "gemini-3-flash-preview"  # Options: "gemini-1.5-flash", "gemini-1.5-pro"
 
 # Parallel processing settings
 MAX_WORKERS = 5       # Number of parallel API requests (lower = more reliable)
@@ -48,7 +53,7 @@ MAX_RETRIES = 3       # Retries per failed request
 
 # Analysis settings
 BASELINE_YEAR = 2005  # Reference year for semantic drift calculation
-MIN_YEAR = 2000       # Earliest year to include in analysis
+MIN_YEAR = 1990       # Earliest year to include in analysis
 MAX_YEAR = 2025       # Latest year to include in analysis
 
 # Debug mode - set to True to see raw API responses
