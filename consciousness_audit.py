@@ -25,17 +25,22 @@ For use in Google Colab with Gemini API
 # ║  Set your API key and output folder below before running                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-# Your Gemini API Key (get one at https://makersuite.google.com/app/apikey)
-GEMINI_API_KEY = ""  # <-- PASTE YOUR API KEY HERE
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+load_dotenv() 
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Google Drive folder path for saving outputs (will be created if doesn't exist)
-GDRIVE_OUTPUT_FOLDER = "/content/drive/MyDrive/consciousness_audit_results"
+GDRIVE_OUTPUT_FOLDER = "./results"
 
 # Path to your bibliography CSV file
-CSV_PATH = "/content/cons_bib.csv"  # Update if your file is elsewhere
+CSV_PATH = "cons_bib.csv"  # Update if your file is elsewhere
 
 # Gemini model to use
-GEMINI_MODEL = "gemini-1.5-flash"  # Options: "gemini-1.5-flash", "gemini-1.5-pro"
+GEMINI_MODEL = "gemini-3-flash-preview"  # Options: "gemini-1.5-flash", "gemini-1.5-pro"
 
 # Parallel processing settings
 MAX_WORKERS = 10  # Number of parallel API requests (be careful with rate limits)
@@ -43,7 +48,7 @@ API_DELAY = 0.1   # Delay between batches (seconds)
 
 # Analysis settings
 BASELINE_YEAR = 2005  # Reference year for semantic drift calculation
-MIN_YEAR = 2000       # Earliest year to include in analysis
+MIN_YEAR = 1990       # Earliest year to include in analysis
 MAX_YEAR = 2025       # Latest year to include in analysis
 
 # =============================================================================
@@ -86,24 +91,15 @@ def install_packages():
 # =============================================================================
 
 def mount_google_drive():
-    """Mount Google Drive for saving outputs."""
-    try:
-        from google.colab import drive
-        drive.mount('/content/drive')
-        print("✅ Google Drive mounted successfully!")
-        return True
-    except ImportError:
-        print("⚠️ Not running in Google Colab - skipping Drive mount")
-        return False
-    except Exception as e:
-        print(f"⚠️ Failed to mount Google Drive: {e}")
-        return False
+    """Placeholder function - not needed locally."""
+    print("💻 Running locally. Saving to local disk.")
+    return True
 
 def setup_output_folder(folder_path: str) -> str:
     """Create output folder if it doesn't exist."""
     import os
     os.makedirs(folder_path, exist_ok=True)
-    print(f"📁 Output folder: {folder_path}")
+    print(f"📁 Output folder ready: {folder_path}")
     return folder_path
 
 # Uncomment to mount Drive:
@@ -912,25 +908,17 @@ def run_full_audit(
 # CELL 13: RUN THE AUDIT (EXECUTE THIS CELL)
 # =============================================================================
 
-# Step 1: Mount Google Drive (run once)
-# mount_google_drive()
-# setup_output_folder(GDRIVE_OUTPUT_FOLDER)
-
-# Step 2: Run the full audit
-# results = run_full_audit()
-
-# Step 3: Display visualizations
-# results['figures']['contrast_sankey'].show()
-# results['figures']['moving_goalposts'].show()
-# results['figures']['adversarial_index'].show()
-
-# Access data:
-# results['data']  # DataFrame with all classifications
-
 if __name__ == "__main__":
-    # Quick run for testing
-    print("Run the audit by uncommenting the lines in CELL 13")
-    print("\nQuick start:")
-    print("1. Set GEMINI_API_KEY at the top of this file")
-    print("2. Run: mount_google_drive()")
-    print("3. Run: results = run_full_audit()")
+    # 1. Setup folders
+    setup_output_folder(GDRIVE_OUTPUT_FOLDER)
+
+    # 2. Run the full audit
+    # Ensure save_to_drive=False so it doesn't try to use Colab paths
+    results = run_full_audit(
+        csv_path=CSV_PATH,
+        output_folder=GDRIVE_OUTPUT_FOLDER,
+        save_to_drive=True # This now saves to your local folder defined in Cell 1
+    )
+    
+    # 3. Confirmation
+    print(f"Done! Check the '{GDRIVE_OUTPUT_FOLDER}' folder for your HTML reports.")
