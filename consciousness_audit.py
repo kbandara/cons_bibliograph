@@ -1,17 +1,21 @@
 """
 ================================================================================
-CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE
+CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE v2.0
 ================================================================================
 A comprehensive bibliometric analysis of consciousness theories:
 IIT (Integrated Information Theory), GNWT (Global Neuronal Workspace Theory),
 HOT (Higher-Order Theory), and RPT (Recurrent Processing Theory).
 
-Three Analyses:
+Seven Analyses:
 1. ConTraSt Audit - Replication of Yaron et al. (2022)
 2. Moving Goalposts - Concept drift analysis over time
 3. Adversarial Index - Cross-theory citation patterns
+4. Neuro-Cartography - Brain region biases per theory
+5. Aggression Index - Hostility trends over time
+6. Easy vs Hard Problem - Phenomenology vs Function
+7. Model Organism Bias - Subject/species distribution
 
-For use in Google Colab with Gemini API
+Extracts 8 dimensions per paper using Gemini LLM.
 ================================================================================
 """
 
@@ -43,13 +47,18 @@ CSV_PATH = "cons_bib.csv"  # Update if your file is elsewhere
 GEMINI_MODEL = "gemini-3-flash-preview"  # Options: "gemini-1.5-flash", "gemini-1.5-pro"
 
 # Parallel processing settings
-MAX_WORKERS = 10  # Number of parallel API requests (be careful with rate limits)
-API_DELAY = 0.1   # Delay between batches (seconds)
+MAX_WORKERS = 5       # Number of parallel API requests (lower = more reliable)
+API_DELAY = 0.2       # Delay between requests (seconds)
+MAX_RETRIES = 3       # Retries per failed request
 
 # Analysis settings
 BASELINE_YEAR = 2005  # Reference year for semantic drift calculation
 MIN_YEAR = 1990       # Earliest year to include in analysis
 MAX_YEAR = 2025       # Latest year to include in analysis
+
+# Debug mode - set to True to see raw API responses
+DEBUG_MODE = False
+DEBUG_SAMPLE_SIZE = 5  # Number of raw responses to print
 
 # =============================================================================
 # CELL 2: INSTALLATION (Run once)
@@ -68,8 +77,7 @@ def install_packages():
         'sentence-transformers',
         'requests',
         'tqdm',
-        'kaleido',
-        'google-generativeai',
+        'kaleido',  # For PNG export
     ]
 
     print("=" * 60)
@@ -87,27 +95,7 @@ def install_packages():
 # install_packages()
 
 # =============================================================================
-# CELL 3: MOUNT GOOGLE DRIVE
-# =============================================================================
-
-def mount_google_drive():
-    """Placeholder function - not needed locally."""
-    print("💻 Running locally. Saving to local disk.")
-    return True
-
-def setup_output_folder(folder_path: str) -> str:
-    """Create output folder if it doesn't exist."""
-    import os
-    os.makedirs(folder_path, exist_ok=True)
-    print(f"📁 Output folder ready: {folder_path}")
-    return folder_path
-
-# Uncomment to mount Drive:
-# mount_google_drive()
-# setup_output_folder(GDRIVE_OUTPUT_FOLDER)
-
-# =============================================================================
-# CELL 4: IMPORTS
+# CELL 3: IMPORTS
 # =============================================================================
 
 import pandas as pd
@@ -118,18 +106,16 @@ import time
 import os
 import warnings
 from typing import Dict, List, Optional, Tuple, Any
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report
 
 from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cosine
@@ -140,7 +126,7 @@ from tqdm import tqdm
 warnings.filterwarnings('ignore')
 
 # =============================================================================
-# CELL 5: DATA LOADING
+# CELL 4: DATA LOADING
 # =============================================================================
 
 def load_bibliography(csv_path: str) -> pd.DataFrame:
@@ -165,7 +151,7 @@ def load_bibliography(csv_path: str) -> pd.DataFrame:
         df_valid = df_valid[df_valid['Year'].notna()]
         df_valid['Year'] = df_valid['Year'].astype(int)
 
-        return df_valid
+        return df_valid.reset_index(drop=True)
 
     except FileNotFoundError:
         print(f"❌ Error: File not found at {csv_path}")
@@ -179,204 +165,301 @@ def extract_first_sentences(text: str, n_sentences: int = 2) -> str:
     return ' '.join(sentences[:n_sentences])
 
 # =============================================================================
-# CELL 6: GEMINI LLM EXTRACTOR (PARALLEL)
+# CELL 5: GEMINI LLM EXTRACTOR - FIXED VERSION
 # =============================================================================
 
 class GeminiExtractor:
     """
     Extract structured information from abstracts using Google Gemini API.
-    Supports parallel processing for faster extraction.
+    Extracts 8 dimensions per paper with robust error handling.
     """
 
-    EXTRACTION_PROMPT = '''You are a consciousness science expert. Analyze this research abstract and classify it.
+    # Simplified, clearer prompt for better extraction
+    EXTRACTION_PROMPT = '''Analyze this consciousness research abstract and classify it on 8 dimensions.
 
 ABSTRACT:
 {abstract}
 
-Based on the abstract, determine:
+CLASSIFICATION GUIDE:
 
-1. THEORY - Which consciousness theory does this paper primarily support or investigate?
-   - IIT: Integrated Information Theory (Tononi). Look for: phi (Φ), integrated information, information geometry, exclusion postulate, intrinsic causal power, IIT, qualia space
-   - GNWT: Global Neuronal Workspace Theory (Dehaene/Baars). Look for: global workspace, ignition, broadcasting, access consciousness, frontal-parietal, P3b, late positivity
-   - HOT: Higher-Order Theory (Rosenthal/Lau). Look for: higher-order thought, higher-order representation, metacognition, prefrontal cortex for awareness
-   - RPT: Recurrent Processing Theory (Lamme). Look for: recurrent processing, feedback loops, local recurrence, V1, feedforward vs feedback
-   - Neutral: If the paper doesn't clearly align with any specific theory, or is methodological/review without theoretical commitment
+1. THEORY - Primary consciousness theory:
+   - IIT: Mentions integrated information, phi (Φ), Tononi, information integration, exclusion postulate
+   - GNWT: Mentions global workspace, Dehaene, Baars, ignition, broadcasting, access consciousness
+   - HOT: Mentions higher-order thought/theory, Rosenthal, metacognition, higher-order representation
+   - RPT: Mentions recurrent processing, Lamme, feedback loops, recurrent activity
+   - Neutral: No clear theoretical alignment, general consciousness study, or methodology paper
 
-2. PARADIGM - What experimental approach is used?
-   - Report: Participants explicitly report their conscious experience (verbal reports, button presses indicating awareness)
-   - No-Report: Consciousness is inferred without requiring explicit reports (e.g., physiological measures, no-report paradigms)
+2. PARADIGM - Experimental approach:
+   - Report: Participants report their experience (verbal, button press, ratings)
+   - No-Report: No explicit reports required (passive viewing, physiological measures only)
 
-3. TYPE - What aspect of consciousness is studied?
-   - Content: Studies WHAT we are conscious of (specific perceptions, visual features, objects)
-   - State: Studies WHETHER/HOW MUCH consciousness is present (levels, anesthesia, sleep, disorders of consciousness)
+3. TYPE - What aspect studied:
+   - Content: What we perceive (visual features, objects, specific experiences)
+   - State: Level/presence of consciousness (sleep, anesthesia, coma, awareness levels)
 
-4. EPISTEMIC - What is the hypothesis approach?
-   - A Priori: Predictions derived from theory before seeing the data
-   - Post-Hoc: Exploratory analyses, interpretations made after seeing results
+4. EPISTEMIC - Hypothesis approach:
+   - A Priori: Theory-driven predictions made before data collection
+   - Post-Hoc: Exploratory analysis, interpretations after seeing results
 
-Respond with ONLY this exact JSON format, nothing else:
-{{"theory": "IIT", "paradigm": "Report", "type": "Content", "epistemic": "A Priori", "confidence": 0.8}}
+5. ANATOMY - Top 3 brain regions mentioned (use standard abbreviations):
+   Examples: PFC, ACC, PPC, V1, V4, IT, MTL, Thalamus, Claustrum, Insula, TPJ
+   Use ["None"] if no specific regions mentioned.
 
-Replace the values with your classifications. Confidence should be 0.0-1.0 based on how clear the classification is.'''
+6. TONE - Attitude toward rival theories (if mentioned):
+   - Dismissive: Rejects other theories as fundamentally flawed
+   - Critical: Points out specific problems with other theories
+   - Constructive: Seeks integration or acknowledges complementary aspects
+   - Neutral: No evaluation of other theories or purely descriptive
 
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash"):
+7. TARGET - What the paper explains:
+   - Phenomenology: Subjective experience, qualia, what-it-is-like, the hard problem
+   - Function: Access, reportability, cognitive functions, information processing
+   - Mechanism: Neural mechanisms, correlates, implementation details
+
+8. SUBJECT - Study population:
+   - Human: Healthy human participants
+   - Clinical: Patients (DOC, anesthesia, neurological conditions)
+   - Animal: Non-human animals (primates, rodents, etc.)
+   - Simulation: Computational models, simulations, theoretical
+   - Review: Literature review, meta-analysis, theoretical review
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{{"theory":"IIT","paradigm":"Report","type":"Content","epistemic":"A Priori","anatomy":["PFC","Thalamus"],"tone":"Neutral","target":"Function","subject":"Human"}}'''
+
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
         self.api_key = api_key
         self.model = model
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         self.session = requests.Session()
+        self.debug_responses = []
 
-        # Validate API key
         if not api_key or api_key == "":
-            raise ValueError("❌ GEMINI_API_KEY is not set! Please add your API key in the Configuration section.")
+            raise ValueError("❌ GEMINI_API_KEY is not set!")
 
-    def _call_gemini(self, abstract: str) -> Dict[str, Any]:
-        """Make a single Gemini API call."""
-        prompt = self.EXTRACTION_PROMPT.format(abstract=abstract[:3000])
+    def _call_gemini(self, abstract: str) -> Tuple[Dict[str, Any], str]:
+        """Make a single Gemini API call. Returns (parsed_result, raw_response)."""
+        prompt = self.EXTRACTION_PROMPT.format(abstract=abstract[:2500])
 
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 150,
-                "topP": 0.8,
+                "temperature": 0.0,  # Deterministic
+                "maxOutputTokens": 200,
+                "topP": 1.0,
             }
-        }
-
-        headers = {
-            "Content-Type": "application/json",
         }
 
         try:
             response = self.session.post(
                 f"{self.base_url}?key={self.api_key}",
                 json=payload,
-                headers=headers,
                 timeout=30
             )
 
             if response.status_code == 429:
-                # Rate limited - wait and signal retry
-                time.sleep(2)
-                return {"_retry": True}
+                time.sleep(3)
+                return {"_retry": True}, "RATE_LIMITED"
 
-            response.raise_for_status()
+            if response.status_code != 200:
+                return self._default(), f"HTTP_{response.status_code}"
+
             result = response.json()
 
             # Extract text from response
             if 'candidates' in result and result['candidates']:
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                return self._parse_response(text)
+                candidate = result['candidates'][0]
+                if 'content' in candidate and 'parts' in candidate['content']:
+                    raw_text = candidate['content']['parts'][0].get('text', '')
+                    parsed = self._parse_response(raw_text)
+                    return parsed, raw_text
 
-            return self._default()
+            return self._default(), "NO_CANDIDATES"
 
+        except requests.exceptions.Timeout:
+            return self._default(), "TIMEOUT"
         except requests.exceptions.RequestException as e:
-            return self._default()
+            return self._default(), f"REQUEST_ERROR: {str(e)[:50]}"
+        except Exception as e:
+            return self._default(), f"ERROR: {str(e)[:50]}"
 
     def _parse_response(self, text: str) -> Dict[str, Any]:
-        """Parse JSON from Gemini response with robust extraction."""
+        """Parse JSON from Gemini response with multiple fallback strategies."""
+        if not text or len(text) < 10:
+            return self._default()
+
+        # Clean the text
+        text = text.strip()
+
+        # Remove markdown code blocks
+        text = re.sub(r'^```json\s*\n?', '', text)
+        text = re.sub(r'^```\s*\n?', '', text)
+        text = re.sub(r'\n?```\s*$', '', text)
+        text = text.strip()
+
+        # Try direct JSON parse first
         try:
-            # Clean the text - remove markdown code blocks if present
-            text = text.strip()
-            text = re.sub(r'^```json\s*', '', text)
-            text = re.sub(r'^```\s*', '', text)
-            text = re.sub(r'\s*```$', '', text)
-
-            # Find JSON object in response
-            json_match = re.search(r'\{[^{}]*"theory"[^{}]*\}', text, re.DOTALL | re.IGNORECASE)
-            if json_match:
-                json_str = json_match.group()
-                data = json.loads(json_str)
-
-                # Validate and normalize values
-                theory = str(data.get("theory", "Neutral")).upper()
-                if theory not in ["IIT", "GNWT", "HOT", "RPT", "NEUTRAL"]:
-                    theory = "Neutral"
-                else:
-                    theory = theory.title() if theory == "NEUTRAL" else theory
-
-                paradigm = str(data.get("paradigm", "Report"))
-                if "no" in paradigm.lower():
-                    paradigm = "No-Report"
-                else:
-                    paradigm = "Report"
-
-                content_type = str(data.get("type", "Content"))
-                if "state" in content_type.lower():
-                    content_type = "State"
-                else:
-                    content_type = "Content"
-
-                epistemic = str(data.get("epistemic", "Post-Hoc"))
-                if "priori" in epistemic.lower():
-                    epistemic = "A Priori"
-                else:
-                    epistemic = "Post-Hoc"
-
-                confidence = float(data.get("confidence", 0.5))
-                confidence = max(0.0, min(1.0, confidence))
-
-                return {
-                    "theory": theory,
-                    "paradigm": paradigm,
-                    "type": content_type,
-                    "epistemic": epistemic,
-                    "confidence": confidence
-                }
-
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            data = json.loads(text)
+            return self._validate_and_normalize(data)
+        except json.JSONDecodeError:
             pass
 
-        # If JSON parsing failed, try to extract from text directly
-        return self._extract_from_text(text)
+        # Try to find JSON object with regex
+        json_patterns = [
+            r'\{[^{}]*"theory"[^{}]*\}',  # Simple object with theory
+            r'\{[\s\S]*?"theory"[\s\S]*?\}',  # Multiline
+        ]
 
-    def _extract_from_text(self, text: str) -> Dict[str, Any]:
-        """Fallback: extract classifications from raw text."""
+        for pattern in json_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                    return self._validate_and_normalize(data)
+                except json.JSONDecodeError:
+                    continue
+
+        # Last resort: extract individual fields with regex
+        return self._extract_fields_from_text(text)
+
+    def _validate_and_normalize(self, data: Dict) -> Dict[str, Any]:
+        """Validate and normalize parsed JSON data."""
+        result = self._default()
+
+        # Theory
+        theory = str(data.get("theory", "")).upper().strip()
+        if theory in ["IIT", "GNWT", "HOT", "RPT"]:
+            result["theory"] = theory
+        elif "NEUTRAL" in theory or not theory:
+            result["theory"] = "Neutral"
+
+        # Paradigm
+        paradigm = str(data.get("paradigm", "")).lower()
+        result["paradigm"] = "No-Report" if "no" in paradigm else "Report"
+
+        # Type
+        type_val = str(data.get("type", "")).lower()
+        result["type"] = "State" if "state" in type_val else "Content"
+
+        # Epistemic
+        epistemic = str(data.get("epistemic", "")).lower()
+        result["epistemic"] = "A Priori" if "priori" in epistemic else "Post-Hoc"
+
+        # Anatomy - handle both list and string
+        anatomy = data.get("anatomy", [])
+        if isinstance(anatomy, str):
+            anatomy = [a.strip() for a in anatomy.split(",") if a.strip()]
+        elif isinstance(anatomy, list):
+            anatomy = [str(a).strip() for a in anatomy if a and str(a).strip().lower() != "none"]
+        result["anatomy"] = anatomy[:3] if anatomy else []
+
+        # Tone
+        tone = str(data.get("tone", "")).lower()
+        if "dismiss" in tone:
+            result["tone"] = "Dismissive"
+        elif "critic" in tone:
+            result["tone"] = "Critical"
+        elif "construct" in tone:
+            result["tone"] = "Constructive"
+        else:
+            result["tone"] = "Neutral"
+
+        # Target
+        target = str(data.get("target", "")).lower()
+        if "phenom" in target:
+            result["target"] = "Phenomenology"
+        elif "mechan" in target:
+            result["target"] = "Mechanism"
+        else:
+            result["target"] = "Function"
+
+        # Subject
+        subject = str(data.get("subject", "")).lower()
+        if "clinical" in subject or "patient" in subject:
+            result["subject"] = "Clinical"
+        elif "animal" in subject:
+            result["subject"] = "Animal"
+        elif "simul" in subject or "model" in subject or "comput" in subject:
+            result["subject"] = "Simulation"
+        elif "review" in subject or "meta" in subject:
+            result["subject"] = "Review"
+        else:
+            result["subject"] = "Human"
+
+        result["confidence"] = 0.8
+        return result
+
+    def _extract_fields_from_text(self, text: str) -> Dict[str, Any]:
+        """Fallback: extract fields from unstructured text."""
+        result = self._default()
         text_upper = text.upper()
 
-        # Theory detection
-        theory = "Neutral"
-        for t in ["IIT", "GNWT", "HOT", "RPT"]:
-            if t in text_upper and "NEUTRAL" not in text_upper:
-                theory = t
+        # Theory - look for explicit mentions
+        for theory in ["IIT", "GNWT", "HOT", "RPT"]:
+            # Look for patterns like "theory": "IIT" or theory: IIT
+            if re.search(rf'["\']?theory["\']?\s*:\s*["\']?{theory}', text, re.IGNORECASE):
+                result["theory"] = theory
                 break
 
-        # Paradigm detection
-        paradigm = "No-Report" if "NO-REPORT" in text_upper or "NO REPORT" in text_upper else "Report"
+        # Other fields
+        if re.search(r'["\']?paradigm["\']?\s*:\s*["\']?no', text, re.IGNORECASE):
+            result["paradigm"] = "No-Report"
 
-        # Type detection
-        content_type = "State" if "STATE" in text_upper else "Content"
+        if re.search(r'["\']?type["\']?\s*:\s*["\']?state', text, re.IGNORECASE):
+            result["type"] = "State"
 
-        # Epistemic detection
-        epistemic = "A Priori" if "A PRIORI" in text_upper or "APRIORI" in text_upper else "Post-Hoc"
+        if re.search(r'["\']?epistemic["\']?\s*:\s*["\']?a\s*priori', text, re.IGNORECASE):
+            result["epistemic"] = "A Priori"
 
-        return {
-            "theory": theory,
-            "paradigm": paradigm,
-            "type": content_type,
-            "epistemic": epistemic,
-            "confidence": 0.3
-        }
+        if re.search(r'["\']?tone["\']?\s*:\s*["\']?dismiss', text, re.IGNORECASE):
+            result["tone"] = "Dismissive"
+        elif re.search(r'["\']?tone["\']?\s*:\s*["\']?critic', text, re.IGNORECASE):
+            result["tone"] = "Critical"
+        elif re.search(r'["\']?tone["\']?\s*:\s*["\']?construct', text, re.IGNORECASE):
+            result["tone"] = "Constructive"
+
+        if re.search(r'["\']?target["\']?\s*:\s*["\']?phenom', text, re.IGNORECASE):
+            result["target"] = "Phenomenology"
+        elif re.search(r'["\']?target["\']?\s*:\s*["\']?mechan', text, re.IGNORECASE):
+            result["target"] = "Mechanism"
+
+        result["confidence"] = 0.3
+        return result
 
     def _default(self) -> Dict[str, Any]:
-        """Return default extraction when API fails."""
+        """Return default extraction."""
         return {
             "theory": "Neutral",
             "paradigm": "Report",
             "type": "Content",
             "epistemic": "Post-Hoc",
+            "anatomy": [],
+            "tone": "Neutral",
+            "target": "Function",
+            "subject": "Human",
             "confidence": 0.0
         }
 
-    def extract_single(self, abstract: str, max_retries: int = 3) -> Dict[str, Any]:
+    def extract_single(self, abstract: str, index: int = 0) -> Dict[str, Any]:
         """Extract from a single abstract with retries."""
         if pd.isna(abstract) or len(str(abstract)) < 50:
             return self._default()
 
-        for attempt in range(max_retries):
-            result = self._call_gemini(abstract)
+        for attempt in range(MAX_RETRIES):
+            result, raw = self._call_gemini(str(abstract))
+
+            # Store debug info
+            if DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
+                self.debug_responses.append({
+                    "index": index,
+                    "abstract": abstract[:200] + "...",
+                    "raw_response": raw[:500] if isinstance(raw, str) else str(raw),
+                    "parsed": result
+                })
+
             if result.get("_retry"):
-                time.sleep(1 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
                 continue
+
             return result
 
         return self._default()
@@ -385,8 +468,8 @@ Replace the values with your classifications. Confidence should be 0.0-1.0 based
         self,
         df: pd.DataFrame,
         abstract_col: str = 'Abstract',
-        max_workers: int = 10,
-        delay: float = 0.1
+        max_workers: int = 5,
+        delay: float = 0.2
     ) -> pd.DataFrame:
         """Extract from all abstracts using parallel processing."""
         print("\n" + "=" * 60)
@@ -395,151 +478,168 @@ Replace the values with your classifications. Confidence should be 0.0-1.0 based
         print(f"Model: {self.model}")
         print(f"Papers to process: {len(df)}")
         print(f"Parallel workers: {max_workers}")
+        if DEBUG_MODE:
+            print(f"🔍 DEBUG MODE ON - will show {DEBUG_SAMPLE_SIZE} raw responses")
 
         abstracts = df[abstract_col].tolist()
-        indices = df.index.tolist()
         results = [None] * len(abstracts)
 
-        # Process in parallel with progress bar
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
             future_to_idx = {
-                executor.submit(self.extract_single, abstract): i
+                executor.submit(self.extract_single, abstract, i): i
                 for i, abstract in enumerate(abstracts)
             }
 
-            # Collect results with progress bar
             for future in tqdm(as_completed(future_to_idx), total=len(abstracts), desc="Extracting"):
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
                 except Exception as e:
                     results[idx] = self._default()
-
-                # Small delay to avoid rate limiting
                 time.sleep(delay)
+
+        # Print debug info
+        if DEBUG_MODE and self.debug_responses:
+            print("\n" + "=" * 60)
+            print("🔍 DEBUG: Sample Raw Responses")
+            print("=" * 60)
+            for d in self.debug_responses:
+                print(f"\n--- Paper {d['index']} ---")
+                print(f"Abstract: {d['abstract']}")
+                print(f"Raw response: {d['raw_response']}")
+                print(f"Parsed theory: {d['parsed']['theory']}")
 
         # Add results to DataFrame
         result_df = df.copy()
-        for key in ['theory', 'paradigm', 'type', 'epistemic', 'confidence']:
-            result_df[key] = [r[key] for r in results]
+        for key in ['theory', 'paradigm', 'type', 'epistemic', 'anatomy', 'tone', 'target', 'subject', 'confidence']:
+            result_df[key] = [r.get(key, self._default()[key]) for r in results]
 
-        # Print statistics
+        # Statistics
         print(f"\n✅ Extraction complete!")
         print(f"\n📊 Theory distribution:")
-        theory_counts = result_df['theory'].value_counts()
-        for theory, count in theory_counts.items():
+        for theory, count in result_df['theory'].value_counts().items():
             pct = count / len(result_df) * 100
-            print(f"   {theory}: {count} ({pct:.1f}%)")
+            bar = "█" * int(pct / 2)
+            print(f"   {theory:8s}: {count:5d} ({pct:5.1f}%) {bar}")
+
+        # Quality check
+        non_neutral = (result_df['theory'] != 'Neutral').sum()
+        print(f"\n📈 Non-neutral classifications: {non_neutral} ({non_neutral/len(result_df)*100:.1f}%)")
+
+        if non_neutral < len(result_df) * 0.05:
+            print("\n⚠️  WARNING: Very few non-neutral classifications!")
+            print("    Consider: 1) Check API responses with DEBUG_MODE=True")
+            print("              2) The corpus may genuinely be mostly neutral")
 
         return result_df
 
 # =============================================================================
-# CELL 7: RULE-BASED EXTRACTOR (FALLBACK)
+# CELL 6: RULE-BASED EXTRACTOR (FALLBACK)
 # =============================================================================
 
 class RuleBasedExtractor:
-    """Rule-based extraction fallback using keyword matching."""
+    """Rule-based extraction using keyword matching - used as fallback."""
 
     THEORY_KEYWORDS = {
-        'IIT': [
-            'integrated information theory', 'integrated information', 'phi', 'tononi',
-            'information integration', 'exclusion', 'intrinsic', 'causal power', ' iit ',
-            'qualia space', 'compositional', 'intrinsic cause-effect', 'axioms of consciousness'
-        ],
-        'GNWT': [
-            'global workspace', 'global neuronal workspace', 'dehaene', 'baars',
-            'ignition', 'broadcasting', 'access consciousness', 'gnwt', ' gnw ',
-            'frontal-parietal', 'frontoparietal', 'prefrontal broadcasting', 'late positivity'
-        ],
-        'HOT': [
-            'higher-order thought', 'higher-order theory', 'higher order', 'rosenthal',
-            'metacognition', 'hot theory', 'higher-order representation', 'lau',
-            'meta-awareness', 'first-order representation'
-        ],
-        'RPT': [
-            'recurrent processing theory', 'recurrent processing', 'lamme', 'feedback loops',
-            'local recurrence', 'feedforward', 'recurrent feedback', ' rpt ',
-            'feedforward sweep', 'recurrent activity'
-        ]
+        'IIT': ['integrated information', 'phi', 'tononi', ' iit ', 'information integration',
+                'exclusion postulate', 'intrinsic causal'],
+        'GNWT': ['global workspace', 'global neuronal workspace', 'dehaene', 'baars',
+                 'ignition', 'broadcasting', ' gnw ', 'access consciousness'],
+        'HOT': ['higher-order', 'higher order thought', 'rosenthal', 'metacognition',
+                'hot theory', 'higher-order representation'],
+        'RPT': ['recurrent processing', 'lamme', ' rpt ', 'recurrent activity',
+                'feedforward sweep', 'local recurrence']
     }
 
+    ANATOMY_KEYWORDS = [
+        'prefrontal', 'pfc', 'dlpfc', 'acc', 'anterior cingulate', 'parietal', 'ppc',
+        'temporal', 'occipital', 'v1', 'v2', 'v4', 'visual cortex', 'thalamus',
+        'claustrum', 'insula', 'tpj', 'temporo-parietal', 'mtl', 'hippocampus',
+        'amygdala', 'basal ganglia', 'cerebellum', 'brainstem', 'posterior hot zone'
+    ]
+
     def extract(self, abstract: str) -> Dict[str, Any]:
-        """Extract classifications using keyword matching."""
+        """Extract using keyword matching."""
         if pd.isna(abstract) or not abstract:
             return self._default()
 
-        abstract_lower = ' ' + abstract.lower() + ' '
+        text = ' ' + abstract.lower() + ' '
 
-        # Score each theory
-        scores = {}
-        for theory, keywords in self.THEORY_KEYWORDS.items():
-            score = sum(1 for kw in keywords if kw.lower() in abstract_lower)
-            scores[theory] = score
-
+        # Theory
+        scores = {t: sum(1 for kw in kws if kw in text) for t, kws in self.THEORY_KEYWORDS.items()}
         max_score = max(scores.values())
         theory = max(scores, key=scores.get) if max_score > 0 else "Neutral"
 
-        # Simple paradigm detection
-        paradigm = "No-Report" if any(kw in abstract_lower for kw in ['no-report', 'no report', 'without report', 'unreportable']) else "Report"
+        # Anatomy
+        anatomy = [kw.upper() for kw in self.ANATOMY_KEYWORDS if kw in text][:3]
 
-        # Simple type detection
-        type_kw = ['level of consciousness', 'disorders of consciousness', 'anesthesia', 'coma', 'vegetative', 'sleep', 'arousal']
-        content_type = "State" if any(kw in abstract_lower for kw in type_kw) else "Content"
+        # Paradigm
+        paradigm = "No-Report" if any(x in text for x in ['no-report', 'no report', 'unreportable']) else "Report"
 
-        # Epistemic detection
-        epistemic = "A Priori" if any(kw in abstract_lower for kw in ['predict', 'hypothesis', 'theory-driven', 'a priori']) else "Post-Hoc"
+        # Type
+        type_val = "State" if any(x in text for x in ['disorder', 'coma', 'anesthesia', 'sleep', 'vegetative']) else "Content"
+
+        # Target
+        target = "Phenomenology" if any(x in text for x in ['qualia', 'phenomenal', 'subjective experience', 'what it is like']) else "Function"
+
+        # Subject
+        if any(x in text for x in ['patient', 'clinical', 'disorder']):
+            subject = "Clinical"
+        elif any(x in text for x in ['monkey', 'mouse', 'rat', 'animal', 'primate']):
+            subject = "Animal"
+        elif any(x in text for x in ['simulation', 'model', 'computational']):
+            subject = "Simulation"
+        elif any(x in text for x in ['review', 'meta-analysis']):
+            subject = "Review"
+        else:
+            subject = "Human"
 
         return {
-            "theory": theory,
-            "paradigm": paradigm,
-            "type": content_type,
-            "epistemic": epistemic,
-            "confidence": min(max_score / 2.0, 1.0) if max_score > 0 else 0.2
+            "theory": theory, "paradigm": paradigm, "type": type_val,
+            "epistemic": "Post-Hoc", "anatomy": anatomy, "tone": "Neutral",
+            "target": target, "subject": subject, "confidence": min(max_score / 2, 1.0)
         }
 
     def _default(self) -> Dict[str, Any]:
-        return {"theory": "Neutral", "paradigm": "Report", "type": "Content", "epistemic": "Post-Hoc", "confidence": 0.0}
+        return {"theory": "Neutral", "paradigm": "Report", "type": "Content",
+                "epistemic": "Post-Hoc", "anatomy": [], "tone": "Neutral",
+                "target": "Function", "subject": "Human", "confidence": 0.0}
 
     def batch_extract(self, df: pd.DataFrame, abstract_col: str = 'Abstract') -> pd.DataFrame:
-        """Extract from all abstracts using rules."""
+        """Extract from all abstracts."""
         print("\n" + "=" * 60)
         print("📝 EXTRACTING WITH RULE-BASED CLASSIFIER")
         print("=" * 60)
 
-        results = [self.extract(row[abstract_col]) for _, row in tqdm(df.iterrows(), total=len(df), desc="Extracting")]
+        results = [self.extract(row[abstract_col]) for _, row in tqdm(df.iterrows(), total=len(df))]
 
         result_df = df.copy()
-        for key in ['theory', 'paradigm', 'type', 'epistemic', 'confidence']:
+        for key in ['theory', 'paradigm', 'type', 'epistemic', 'anatomy', 'tone', 'target', 'subject', 'confidence']:
             result_df[key] = [r[key] for r in results]
 
-        print(f"\n✅ Extraction complete!")
         print(f"\n📊 Theory distribution:")
-        for theory, count in result_df['theory'].value_counts().items():
-            print(f"   {theory}: {count} ({count/len(result_df)*100:.1f}%)")
+        for t, c in result_df['theory'].value_counts().items():
+            print(f"   {t}: {c} ({c/len(result_df)*100:.1f}%)")
 
         return result_df
 
 # =============================================================================
-# CELL 8: PART 1 - CONTRAST AUDIT
+# CELL 7: ANALYSIS 1 - CONTRAST AUDIT
 # =============================================================================
 
-def run_contrast_audit(df: pd.DataFrame) -> Tuple[Optional[go.Figure], Dict[str, Any]]:
-    """
-    PART 1: ConTraSt Audit - Does Methodology Predict Theory?
-    """
+def run_contrast_audit(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 1: ConTraSt Audit - Does Methodology Predict Theory?"""
     print("\n" + "=" * 60)
-    print("📊 PART 1: CONTRAST AUDIT")
+    print("📊 ANALYSIS 1: CONTRAST AUDIT")
     print("Does Methodology Predict Theory?")
     print("=" * 60)
 
-    # Filter to papers with theory assignments
     df_theories = df[df['theory'] != 'Neutral'].copy()
-    print(f"\nPapers with theory assignment: {len(df_theories)}")
+    print(f"Papers with theory assignment: {len(df_theories)}")
 
-    if len(df_theories) < 10:
-        print("⚠️ Insufficient papers with theory classifications for analysis")
-        return None, {"error": "Insufficient data", "n_papers": len(df_theories)}
+    if len(df_theories) < 20:
+        print("⚠️ Insufficient papers for analysis")
+        return {"error": "Insufficient data", "n_papers": len(df_theories)}
 
     # Encode features
     le_paradigm = LabelEncoder()
@@ -553,345 +653,467 @@ def run_contrast_audit(df: pd.DataFrame) -> Tuple[Optional[go.Figure], Dict[str,
     X = df_theories[['paradigm_enc', 'type_enc']].values
     y = df_theories['theory_enc'].values
 
-    # Train RandomForest
-    print("\n🌲 Training RandomForest Classifier...")
+    # RandomForest
+    print("\n🌲 Training RandomForest...")
     rf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
-    cv_scores = cross_val_score(rf, X, y, cv=min(5, len(df_theories)))
-    print(f"Cross-validation accuracy: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
+    cv_scores = cross_val_score(rf, X, y, cv=min(5, len(set(y))))
+    print(f"CV Accuracy: {cv_scores.mean():.3f} (+/- {cv_scores.std()*2:.3f})")
 
     rf.fit(X, y)
-    importances = rf.feature_importances_
-    print(f"\nFeature Importances:")
-    print(f"   Paradigm: {importances[0]:.3f}")
-    print(f"   Type: {importances[1]:.3f}")
+    print(f"Feature Importance - Paradigm: {rf.feature_importances_[0]:.3f}, Type: {rf.feature_importances_[1]:.3f}")
 
-    # Create Sankey Diagram
-    print("\n🎨 Creating Sankey Diagram...")
-
-    paradigm_theory_counts = df_theories.groupby(['paradigm', 'theory']).size().reset_index(name='count')
+    # Sankey Diagram
+    counts = df_theories.groupby(['paradigm', 'theory']).size().reset_index(name='count')
     paradigms = df_theories['paradigm'].unique().tolist()
     theories = df_theories['theory'].unique().tolist()
 
-    node_labels = paradigms + theories
-    node_colors = ['#2E86AB', '#A23B72'] + ['#F18F01', '#C73E1D', '#3B1F2B', '#95190C'][:len(theories)]
-
-    sources, targets, values, link_colors = [], [], [], []
-
-    for _, row in paradigm_theory_counts.iterrows():
-        source_idx = paradigms.index(row['paradigm'])
-        target_idx = len(paradigms) + theories.index(row['theory'])
-        sources.append(source_idx)
-        targets.append(target_idx)
+    sources, targets, values = [], [], []
+    for _, row in counts.iterrows():
+        sources.append(paradigms.index(row['paradigm']))
+        targets.append(len(paradigms) + theories.index(row['theory']))
         values.append(row['count'])
-        link_colors.append('rgba(46, 134, 171, 0.4)' if row['paradigm'] == 'Report' else 'rgba(162, 59, 114, 0.4)')
 
-    fig = go.Figure(data=[go.Sankey(
-        node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5),
-                  label=node_labels, color=node_colors[:len(node_labels)]),
-        link=dict(source=sources, target=targets, value=values, color=link_colors)
-    )])
+    fig = go.Figure(go.Sankey(
+        node=dict(pad=15, thickness=20, label=paradigms + theories,
+                  color=['#2E86AB', '#A23B72'] + ['#F18F01', '#C73E1D', '#3B1F2B', '#95190C'][:len(theories)]),
+        link=dict(source=sources, target=targets, value=values)
+    ))
 
     fig.update_layout(
-        title=dict(
-            text=f"<b>ConTraSt Audit: Paradigm → Theory Flow</b><br><sup>RF Accuracy: {cv_scores.mean():.1%} | n={len(df_theories)} papers</sup>",
-            font=dict(size=18)
-        ),
+        title=f"<b>ConTraSt: Paradigm → Theory</b><br><sup>RF Accuracy: {cv_scores.mean():.1%} | n={len(df_theories)}</sup>",
         font=dict(size=12), height=500, width=800
     )
 
-    return fig, {
-        'cv_accuracy_mean': cv_scores.mean(),
-        'cv_accuracy_std': cv_scores.std(),
-        'feature_importances': {'Paradigm': importances[0], 'Type': importances[1]},
-        'n_papers': len(df_theories)
-    }
+    fig.write_image(os.path.join(output_folder, "1_contrast_sankey.png"), scale=2)
+    print(f"  ✅ Saved: 1_contrast_sankey.png")
+
+    return {"cv_accuracy": cv_scores.mean(), "n_papers": len(df_theories)}
 
 # =============================================================================
-# CELL 9: PART 2 - MOVING GOALPOSTS
+# CELL 8: ANALYSIS 2 - MOVING GOALPOSTS
 # =============================================================================
 
-def run_moving_goalposts(df: pd.DataFrame, baseline_year: int = 2005, min_year: int = 2000, max_year: int = 2025) -> Tuple[go.Figure, Dict[str, Any]]:
-    """
-    PART 2: Moving Goalposts - Concept Drift Analysis
-    """
+def run_moving_goalposts(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 2: Moving Goalposts - Semantic Drift Analysis"""
     print("\n" + "=" * 60)
-    print("📈 PART 2: MOVING GOALPOSTS ANALYSIS")
-    print("Quantifying Semantic Drift Over Time")
+    print("📈 ANALYSIS 2: MOVING GOALPOSTS")
+    print("Semantic Drift Over Time")
     print("=" * 60)
 
-    print("\n🤖 Loading sentence transformer model...")
+    print("🤖 Loading sentence transformer...")
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
     df_theories = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
-    print(f"Papers with theory assignment: {len(df_theories)}")
+    print(f"Papers with theory: {len(df_theories)}")
 
-    df_theories['definition_text'] = df_theories['Abstract'].apply(lambda x: extract_first_sentences(x, 2))
-    df_theories = df_theories[df_theories['definition_text'].str.len() > 20]
+    if len(df_theories) < 10:
+        print("⚠️ Insufficient papers")
+        return {"error": "Insufficient data"}
 
-    print("\n📊 Computing embeddings by theory and year...")
+    df_theories['def_text'] = df_theories['Abstract'].apply(lambda x: extract_first_sentences(x, 2))
 
-    drift_data = defaultdict(list)
+    drift_data = {}
     colors = {'IIT': '#E63946', 'GNWT': '#457B9D', 'HOT': '#2A9D8F', 'RPT': '#E9C46A'}
 
-    for theory in tqdm(['IIT', 'GNWT', 'HOT', 'RPT'], desc="Processing theories"):
-        theory_df = df_theories[df_theories['theory'] == theory]
-
-        if len(theory_df) < 3:
-            print(f"  ⚠️ Skipping {theory}: insufficient papers ({len(theory_df)})")
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+        tdf = df_theories[df_theories['theory'] == theory]
+        if len(tdf) < 3:
             continue
 
         embeddings_by_year = {}
-        for year in range(min_year, max_year + 1):
-            year_df = theory_df[theory_df['Year'] == year]
-            if len(year_df) >= 1:
-                embeddings_by_year[year] = model.encode(year_df['definition_text'].tolist())
+        for year in range(MIN_YEAR, MAX_YEAR + 1):
+            ydf = tdf[tdf['Year'] == year]
+            if len(ydf) >= 1:
+                embeddings_by_year[year] = model.encode(ydf['def_text'].tolist())
 
         if not embeddings_by_year:
             continue
 
-        available_years = sorted(embeddings_by_year.keys())
-        base_year = baseline_year if baseline_year in available_years else available_years[0]
-        baseline_centroid = np.mean(embeddings_by_year[base_year], axis=0)
+        years = sorted(embeddings_by_year.keys())
+        base_year = BASELINE_YEAR if BASELINE_YEAR in years else years[0]
+        baseline = np.mean(embeddings_by_year[base_year], axis=0)
 
-        for year in available_years:
-            year_centroid = np.mean(embeddings_by_year[year], axis=0)
-            drift_data[theory].append({
-                'year': year,
-                'drift': cosine(baseline_centroid, year_centroid),
-                'n_papers': len(embeddings_by_year[year])
-            })
-
-    print("\n🎨 Creating drift visualization...")
+        drift_data[theory] = [
+            {"year": y, "drift": cosine(baseline, np.mean(embeddings_by_year[y], axis=0))}
+            for y in years
+        ]
 
     fig = go.Figure()
-    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
-        if theory not in drift_data:
-            continue
-        td = pd.DataFrame(drift_data[theory]).sort_values('year')
+    for theory, data in drift_data.items():
+        td = pd.DataFrame(data).sort_values('year')
         if len(td) > 3:
-            td['drift_smooth'] = td['drift'].rolling(3, min_periods=1, center=True).mean()
-        else:
-            td['drift_smooth'] = td['drift']
-
+            td['drift'] = td['drift'].rolling(3, min_periods=1, center=True).mean()
         fig.add_trace(go.Scatter(
-            x=td['year'], y=td['drift_smooth'], mode='lines+markers', name=theory,
-            line=dict(color=colors[theory], width=3), marker=dict(size=8)
+            x=td['year'], y=td['drift'], mode='lines+markers', name=theory,
+            line=dict(color=colors[theory], width=3)
         ))
 
     fig.update_layout(
-        title=dict(text="<b>Moving Goalposts: Semantic Drift in Theory Definitions</b><br><sup>Cosine distance from baseline (higher = more change)</sup>", font=dict(size=18)),
-        xaxis=dict(title="Year", tickmode='linear', tick0=min_year, dtick=5),
-        yaxis=dict(title="Semantic Drift (Cosine Distance)", rangemode='tozero'),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        title="<b>Moving Goalposts: Semantic Drift</b><br><sup>Cosine distance from baseline</sup>",
+        xaxis_title="Year", yaxis_title="Semantic Drift",
         height=500, width=900
     )
 
-    fig.add_annotation(text="↑ Rising = Changing definition", xref="paper", yref="paper",
-                       x=0.02, y=0.98, showarrow=False, font=dict(size=11, color="gray"))
+    fig.write_image(os.path.join(output_folder, "2_moving_goalposts.png"), scale=2)
+    print(f"  ✅ Saved: 2_moving_goalposts.png")
 
-    return fig, {'drift_data': dict(drift_data), 'baseline_year': baseline_year}
+    return {"drift_data": drift_data}
 
 # =============================================================================
-# CELL 10: PART 3 - ADVERSARIAL INDEX
+# CELL 9: ANALYSIS 3 - ADVERSARIAL INDEX
 # =============================================================================
 
-def run_adversarial_index(df: pd.DataFrame, min_year: int = 2000, max_year: int = 2025) -> Tuple[go.Figure, Dict[str, Any]]:
-    """
-    PART 3: Adversarial Index - Cross-Theory Engagement
-    """
+def run_adversarial_index(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 3: Adversarial Index - Cross-Theory Engagement"""
     print("\n" + "=" * 60)
-    print("⚔️ PART 3: ADVERSARIAL INDEX")
-    print("Measuring Cross-Theory Engagement")
+    print("⚔️ ANALYSIS 3: ADVERSARIAL INDEX")
+    print("Cross-Theory Citations")
     print("=" * 60)
 
-    theory_patterns = {
-        'IIT': r'\b(integrated information( theory)?|iit|tononi|phi\b)',
-        'GNWT': r'\b(global (neuronal )?workspace( theory)?|gnw(t)?|dehaene|baars)',
-        'HOT': r'\b(higher[- ]order( thought| theory)?|hot theory|rosenthal)',
-        'RPT': r'\b(recurrent processing( theory)?|rpt|lamme)'
+    patterns = {
+        'IIT': r'\b(integrated information|iit\b|tononi)',
+        'GNWT': r'\b(global.?workspace|gnw|dehaene|baars)',
+        'HOT': r'\b(higher.?order|hot theory|rosenthal)',
+        'RPT': r'\b(recurrent processing|rpt\b|lamme)'
     }
 
-    def count_theories(abstract: str) -> List[str]:
-        if pd.isna(abstract):
-            return []
-        abstract_lower = abstract.lower()
-        return [t for t, p in theory_patterns.items() if re.search(p, abstract_lower)]
-
-    print("\n📊 Analyzing cross-theory mentions...")
+    def count_theories(text):
+        if pd.isna(text): return []
+        return [t for t, p in patterns.items() if re.search(p, text.lower())]
 
     df['theories_mentioned'] = df['Abstract'].apply(count_theories)
-    df['n_theories'] = df['theories_mentioned'].apply(len)
-    df['is_adversarial'] = df['n_theories'] >= 2
+    df['is_adversarial'] = df['theories_mentioned'].apply(len) >= 2
 
     yearly = df.groupby('Year').agg(
         total=('Title', 'count'),
         adversarial=('is_adversarial', 'sum')
     ).reset_index()
     yearly['pct'] = yearly['adversarial'] / yearly['total'] * 100
-    yearly = yearly[(yearly['Year'] >= min_year) & (yearly['Year'] <= max_year)]
+    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
 
-    print(f"\nTotal adversarial papers: {df['is_adversarial'].sum()}")
-    print(f"Overall rate: {df['is_adversarial'].mean()*100:.1f}%")
-
-    examples = df[df['is_adversarial']].head(3)
-    print("\nExample adversarial papers:")
-    for _, r in examples.iterrows():
-        print(f"  - {r['Title'][:60]}... ({r['theories_mentioned']})")
-
-    print("\n🎨 Creating visualization...")
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=yearly['Year'], y=yearly['pct'], name='Adversarial (%)', marker_color='#E63946'))
+    print(f"Adversarial papers: {df['is_adversarial'].sum()} ({df['is_adversarial'].mean()*100:.1f}%)")
 
     z = np.polyfit(yearly['Year'], yearly['pct'], 1)
-    trend_dir = "increasing" if z[0] > 0 else "decreasing"
+    trend = "increasing" if z[0] > 0 else "decreasing"
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=yearly['Year'], y=yearly['pct'], marker_color='#E63946'))
     fig.add_trace(go.Scatter(x=yearly['Year'], y=np.poly1d(z)(yearly['Year']),
-                             mode='lines', name='Trend', line=dict(color='#1D3557', width=2, dash='dash')))
+                             mode='lines', line=dict(color='#1D3557', dash='dash'), name='Trend'))
 
     fig.update_layout(
-        title=dict(text=f"<b>Adversarial Index: Cross-Theory Engagement</b><br><sup>Papers mentioning 2+ theories | Trend: {trend_dir}</sup>", font=dict(size=18)),
-        xaxis=dict(title="Year"), yaxis=dict(title="% of Papers"),
+        title=f"<b>Adversarial Index</b><br><sup>Papers citing 2+ theories | Trend: {trend}</sup>",
+        xaxis_title="Year", yaxis_title="% of Papers",
         height=500, width=900
     )
 
-    trend_color = "#2A9D8F" if z[0] > 0 else "#E76F51"
-    fig.add_annotation(
-        text=f"{'📈 Less siloed' if z[0] > 0 else '📉 More siloed'}",
-        xref="paper", yref="paper", x=0.02, y=0.95, showarrow=False,
-        font=dict(size=12, color=trend_color), bgcolor="white", borderpad=4
-    )
+    fig.write_image(os.path.join(output_folder, "3_adversarial_index.png"), scale=2)
+    print(f"  ✅ Saved: 3_adversarial_index.png")
 
-    return fig, {'yearly': yearly.to_dict('records'), 'total_adversarial': int(df['is_adversarial'].sum()),
-                 'rate': float(df['is_adversarial'].mean()), 'trend': trend_dir}
+    return {"total": int(df['is_adversarial'].sum()), "trend": trend}
 
 # =============================================================================
-# CELL 11: SAVE RESULTS TO GOOGLE DRIVE
+# CELL 10: ANALYSIS 4 - NEURO-CARTOGRAPHY
 # =============================================================================
 
-def save_results_to_drive(
-    figures: Dict[str, go.Figure],
-    df: pd.DataFrame,
-    results: Dict[str, Any],
-    output_folder: str
-) -> None:
-    """Save all results to Google Drive."""
-    import os
-
+def run_neuro_cartography(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 4: Neuro-Cartography - Brain Region Biases"""
     print("\n" + "=" * 60)
-    print("💾 SAVING RESULTS TO GOOGLE DRIVE")
+    print("🧠 ANALYSIS 4: NEURO-CARTOGRAPHY")
+    print("Brain Region Frequency by Theory")
     print("=" * 60)
 
-    os.makedirs(output_folder, exist_ok=True)
+    df_theories = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
 
-    # Save figures as HTML
-    for name, fig in figures.items():
-        if fig is not None:
-            path = os.path.join(output_folder, f"{name}.html")
-            fig.write_html(path)
-            print(f"  ✅ Saved: {path}")
+    if len(df_theories) < 10:
+        print("⚠️ Insufficient papers")
+        return {"error": "Insufficient data"}
 
-    # Save classified data
-    csv_path = os.path.join(output_folder, "classified_papers.csv")
-    df.to_csv(csv_path, index=False)
-    print(f"  ✅ Saved: {csv_path}")
+    # Collect all regions
+    region_counts = defaultdict(lambda: defaultdict(int))
 
-    # Save summary JSON
-    json_path = os.path.join(output_folder, "analysis_summary.json")
-    with open(json_path, 'w') as f:
-        # Convert numpy types to native Python types
-        def convert(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            return obj
+    for _, row in df_theories.iterrows():
+        theory = row['theory']
+        anatomy = row.get('anatomy', [])
+        if isinstance(anatomy, list):
+            for region in anatomy:
+                if region and str(region).lower() != 'none':
+                    region_counts[theory][str(region).upper()] += 1
 
-        summary = {k: {k2: convert(v2) for k2, v2 in v.items()} if isinstance(v, dict) else convert(v)
-                   for k, v in results.items()}
-        json.dump(summary, f, indent=2, default=str)
-    print(f"  ✅ Saved: {json_path}")
+    # Get top regions
+    all_regions = Counter()
+    for theory_regions in region_counts.values():
+        all_regions.update(theory_regions)
 
-    print(f"\n📁 All results saved to: {output_folder}")
+    top_regions = [r for r, _ in all_regions.most_common(15)]
+
+    if not top_regions:
+        print("⚠️ No brain regions extracted")
+        return {"error": "No regions found"}
+
+    # Build matrix
+    theories = ['IIT', 'GNWT', 'HOT', 'RPT']
+    matrix = []
+    for theory in theories:
+        row = [region_counts[theory].get(r, 0) for r in top_regions]
+        # Normalize by total papers for theory
+        total = sum(row) if sum(row) > 0 else 1
+        matrix.append([x / total * 100 for x in row])
+
+    fig = go.Figure(go.Heatmap(
+        z=matrix, x=top_regions, y=theories,
+        colorscale='Reds', text=[[f"{v:.0f}%" for v in row] for row in matrix],
+        texttemplate="%{text}", textfont={"size": 10}
+    ))
+
+    fig.update_layout(
+        title="<b>Neuro-Cartography: Brain Regions by Theory</b><br><sup>Normalized frequency (%)</sup>",
+        height=400, width=1000
+    )
+
+    fig.write_image(os.path.join(output_folder, "4_neuro_cartography.png"), scale=2)
+    print(f"  ✅ Saved: 4_neuro_cartography.png")
+
+    return {"top_regions": top_regions}
 
 # =============================================================================
-# CELL 12: MAIN EXECUTION PIPELINE
+# CELL 11: ANALYSIS 5 - AGGRESSION INDEX
+# =============================================================================
+
+def run_aggression_index(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 5: Aggression Index - Hostility Over Time"""
+    print("\n" + "=" * 60)
+    print("😤 ANALYSIS 5: AGGRESSION INDEX")
+    print("Hostility Trends Over Time")
+    print("=" * 60)
+
+    df_theories = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+
+    # Count hostile tones by year
+    yearly = df_theories.groupby('Year').apply(
+        lambda x: pd.Series({
+            'total': len(x),
+            'dismissive': (x['tone'] == 'Dismissive').sum(),
+            'critical': (x['tone'] == 'Critical').sum(),
+            'constructive': (x['tone'] == 'Constructive').sum()
+        })
+    ).reset_index()
+
+    yearly['hostility_pct'] = (yearly['dismissive'] + yearly['critical']) / yearly['total'] * 100
+    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
+
+    if len(yearly) < 3:
+        print("⚠️ Insufficient data")
+        return {"error": "Insufficient data"}
+
+    z = np.polyfit(yearly['Year'], yearly['hostility_pct'], 1)
+    trend = "increasing" if z[0] > 0 else "decreasing"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=yearly['Year'], y=yearly['hostility_pct'], mode='lines+markers',
+        line=dict(color='#E63946', width=3), name='Hostility %'
+    ))
+    fig.add_trace(go.Scatter(
+        x=yearly['Year'], y=np.poly1d(z)(yearly['Year']),
+        mode='lines', line=dict(color='#1D3557', dash='dash'), name='Trend'
+    ))
+
+    fig.update_layout(
+        title=f"<b>Aggression Index: Hostility Over Time</b><br><sup>% Dismissive + Critical | Trend: {trend}</sup>",
+        xaxis_title="Year", yaxis_title="Hostility %",
+        height=500, width=900
+    )
+
+    fig.write_image(os.path.join(output_folder, "5_aggression_index.png"), scale=2)
+    print(f"  ✅ Saved: 5_aggression_index.png")
+
+    return {"trend": trend}
+
+# =============================================================================
+# CELL 12: ANALYSIS 6 - EASY VS HARD PROBLEM
+# =============================================================================
+
+def run_easy_vs_hard(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 6: Easy vs Hard Problem Analysis"""
+    print("\n" + "=" * 60)
+    print("🤔 ANALYSIS 6: EASY VS HARD PROBLEM")
+    print("Phenomenology vs Function")
+    print("=" * 60)
+
+    df_theories = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+
+    if len(df_theories) < 10:
+        print("⚠️ Insufficient papers")
+        return {"error": "Insufficient data"}
+
+    # Count targets by theory
+    counts = df_theories.groupby(['theory', 'target']).size().unstack(fill_value=0)
+
+    # Ensure all columns exist
+    for col in ['Phenomenology', 'Function', 'Mechanism']:
+        if col not in counts.columns:
+            counts[col] = 0
+
+    # Normalize
+    counts_pct = counts.div(counts.sum(axis=1), axis=0) * 100
+
+    fig = go.Figure()
+    colors = {'Phenomenology': '#E63946', 'Function': '#457B9D', 'Mechanism': '#2A9D8F'}
+
+    for target in ['Phenomenology', 'Function', 'Mechanism']:
+        if target in counts_pct.columns:
+            fig.add_trace(go.Bar(
+                x=counts_pct.index, y=counts_pct[target],
+                name=target, marker_color=colors[target]
+            ))
+
+    fig.update_layout(
+        title="<b>Easy vs Hard Problem</b><br><sup>What does each theory explain?</sup>",
+        xaxis_title="Theory", yaxis_title="% of Papers",
+        barmode='stack', height=500, width=800
+    )
+
+    fig.write_image(os.path.join(output_folder, "6_easy_vs_hard.png"), scale=2)
+    print(f"  ✅ Saved: 6_easy_vs_hard.png")
+
+    return {"counts": counts.to_dict()}
+
+# =============================================================================
+# CELL 13: ANALYSIS 7 - MODEL ORGANISM BIAS
+# =============================================================================
+
+def run_model_organism(df: pd.DataFrame, output_folder: str) -> Dict[str, Any]:
+    """Part 7: Model Organism Bias - Subject Distribution"""
+    print("\n" + "=" * 60)
+    print("🐁 ANALYSIS 7: MODEL ORGANISM BIAS")
+    print("Subject Distribution by Theory")
+    print("=" * 60)
+
+    df_theories = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+
+    if len(df_theories) < 10:
+        print("⚠️ Insufficient papers")
+        return {"error": "Insufficient data"}
+
+    # Count subjects by theory
+    counts = df_theories.groupby(['theory', 'subject']).size().unstack(fill_value=0)
+
+    # Normalize
+    counts_pct = counts.div(counts.sum(axis=1), axis=0) * 100
+
+    fig = go.Figure()
+    colors = {'Human': '#2E86AB', 'Clinical': '#A23B72', 'Animal': '#F18F01',
+              'Simulation': '#C73E1D', 'Review': '#6C757D'}
+
+    for subject in ['Human', 'Clinical', 'Animal', 'Simulation', 'Review']:
+        if subject in counts_pct.columns:
+            fig.add_trace(go.Bar(
+                x=counts_pct.index, y=counts_pct[subject],
+                name=subject, marker_color=colors.get(subject, '#333')
+            ))
+
+    fig.update_layout(
+        title="<b>Model Organism Bias</b><br><sup>What data does each theory use?</sup>",
+        xaxis_title="Theory", yaxis_title="% of Papers",
+        barmode='stack', height=500, width=800
+    )
+
+    fig.write_image(os.path.join(output_folder, "7_model_organism.png"), scale=2)
+    print(f"  ✅ Saved: 7_model_organism.png")
+
+    return {"counts": counts.to_dict()}
+
+# =============================================================================
+# CELL 14: MAIN PIPELINE
 # =============================================================================
 
 def run_full_audit(
     csv_path: str = CSV_PATH,
     api_key: str = GEMINI_API_KEY,
-    output_folder: str = GDRIVE_OUTPUT_FOLDER,
+    output_folder: str = OUTPUT_FOLDER,
     use_llm: bool = True,
-    max_workers: int = MAX_WORKERS,
-    save_to_drive: bool = True
+    use_rules_only: bool = False
 ) -> Dict[str, Any]:
-    """
-    Run the complete Consciousness Wars bibliometric audit.
-    """
+    """Run the complete 7-analysis audit."""
+
     print("\n" + "=" * 70)
-    print("    🧠 CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT 🧠")
+    print("    🧠 CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT v2.0 🧠")
     print("    IIT vs GNWT vs HOT vs RPT")
+    print("    8 Dimensions × 7 Analyses")
     print("=" * 70)
+
+    os.makedirs(output_folder, exist_ok=True)
 
     # Load data
     df = load_bibliography(csv_path)
 
     # Extract classifications
-    if use_llm:
+    if use_rules_only:
+        print("\n📝 Using RULE-BASED extraction only")
+        df_classified = RuleBasedExtractor().batch_extract(df)
+    elif use_llm and api_key:
         try:
             extractor = GeminiExtractor(api_key, GEMINI_MODEL)
-            # Test connection
-            test = extractor.extract_single("This paper investigates integrated information theory and phi.")
-            print(f"✅ Gemini API connected | Test: {test['theory']}")
-            df_classified = extractor.batch_extract_parallel(df, max_workers=max_workers)
+            test = extractor.extract_single("This paper tests integrated information theory using phi measures.", 0)
+            print(f"✅ Gemini connected | Test: {test['theory']}")
+            df_classified = extractor.batch_extract_parallel(df, max_workers=MAX_WORKERS, delay=API_DELAY)
         except Exception as e:
-            print(f"⚠️ Gemini extraction failed: {e}")
-            print("Falling back to rule-based extraction...")
+            print(f"⚠️ Gemini failed: {e}")
+            print("Falling back to rule-based...")
             df_classified = RuleBasedExtractor().batch_extract(df)
     else:
         df_classified = RuleBasedExtractor().batch_extract(df)
 
-    # Run analyses
+    # Run all analyses
     results = {}
-    figures = {}
 
-    # Part 1
+    print("\n" + "=" * 60)
+    print("📊 RUNNING 7 ANALYSES")
+    print("=" * 60)
+
     try:
-        fig1, res1 = run_contrast_audit(df_classified)
-        figures['contrast_sankey'] = fig1
-        results['contrast_audit'] = res1
+        results['contrast'] = run_contrast_audit(df_classified, output_folder)
     except Exception as e:
-        print(f"⚠️ ConTraSt audit failed: {e}")
-        results['contrast_audit'] = {'error': str(e)}
+        print(f"⚠️ Analysis 1 failed: {e}")
 
-    # Part 2
     try:
-        fig2, res2 = run_moving_goalposts(df_classified, BASELINE_YEAR, MIN_YEAR, MAX_YEAR)
-        figures['moving_goalposts'] = fig2
-        results['moving_goalposts'] = res2
+        results['goalposts'] = run_moving_goalposts(df_classified, output_folder)
     except Exception as e:
-        print(f"⚠️ Moving Goalposts failed: {e}")
-        results['moving_goalposts'] = {'error': str(e)}
+        print(f"⚠️ Analysis 2 failed: {e}")
 
-    # Part 3
     try:
-        fig3, res3 = run_adversarial_index(df_classified, MIN_YEAR, MAX_YEAR)
-        figures['adversarial_index'] = fig3
-        results['adversarial_index'] = res3
+        results['adversarial'] = run_adversarial_index(df_classified, output_folder)
     except Exception as e:
-        print(f"⚠️ Adversarial Index failed: {e}")
-        results['adversarial_index'] = {'error': str(e)}
+        print(f"⚠️ Analysis 3 failed: {e}")
 
-    # Save to Drive
-    if save_to_drive:
-        try:
-            save_results_to_drive(figures, df_classified, results, output_folder)
-        except Exception as e:
-            print(f"⚠️ Failed to save to Drive: {e}")
-            # Save locally instead
-            save_results_to_drive(figures, df_classified, results, "./outputs")
+    try:
+        results['cartography'] = run_neuro_cartography(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Analysis 4 failed: {e}")
+
+    try:
+        results['aggression'] = run_aggression_index(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Analysis 5 failed: {e}")
+
+    try:
+        results['easy_hard'] = run_easy_vs_hard(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Analysis 6 failed: {e}")
+
+    try:
+        results['organism'] = run_model_organism(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Analysis 7 failed: {e}")
+
+    # Save data
+    df_classified.to_csv(os.path.join(output_folder, "classified_papers.csv"), index=False)
+    print(f"\n💾 Saved: classified_papers.csv")
+
+    with open(os.path.join(output_folder, "results.json"), 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+    print(f"💾 Saved: results.json")
 
     # Summary
     print("\n" + "=" * 70)
@@ -902,23 +1124,23 @@ def run_full_audit(
     for t, c in df_classified['theory'].value_counts().items():
         print(f"   {t}: {c} ({c/len(df_classified)*100:.1f}%)")
 
-    return {'data': df_classified, 'results': results, 'figures': figures}
+    print(f"\n📁 Results saved to: {output_folder}")
+
+    return {'data': df_classified, 'results': results}
+
 
 # =============================================================================
-# CELL 13: RUN THE AUDIT (EXECUTE THIS CELL)
+# CELL 15: RUN
 # =============================================================================
 
 if __name__ == "__main__":
-    # 1. Setup folders
-    setup_output_folder(GDRIVE_OUTPUT_FOLDER)
-
-    # 2. Run the full audit
-    # Ensure save_to_drive=False so it doesn't try to use Colab paths
-    results = run_full_audit(
-        csv_path=CSV_PATH,
-        output_folder=GDRIVE_OUTPUT_FOLDER,
-        save_to_drive=True # This now saves to your local folder defined in Cell 1
-    )
-    
-    # 3. Confirmation
-    print(f"Done! Check the '{GDRIVE_OUTPUT_FOLDER}' folder for your HTML reports.")
+    print("=" * 60)
+    print("CONSCIOUSNESS WARS AUDIT")
+    print("=" * 60)
+    print("\nTo run:")
+    print("  1. Set GEMINI_API_KEY at the top")
+    print("  2. Call: results = run_full_audit()")
+    print("\nOptions:")
+    print("  - use_llm=True  → Use Gemini (default)")
+    print("  - use_rules_only=True → Skip Gemini, use keywords only")
+    print("  - DEBUG_MODE=True → See raw API responses")
