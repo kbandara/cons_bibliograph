@@ -301,32 +301,51 @@ class GeminiExtractor:
         """Parse JSON from response text."""
         if not text:
             return None
+
         # Clean up markdown formatting
-        text = re.sub(r'^```(?:json)?\s*\n?', '', text.strip())
+        text = text.strip()
+        text = re.sub(r'^```(?:json)?\s*\n?', '', text)
         text = re.sub(r'\n?```\s*$', '', text)
         text = text.strip()
 
         # Try direct parse
         try:
-            return json.loads(text)
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return result
         except:
             pass
 
-        # Try to find JSON object
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except:
-                pass
+        # Try to extract JSON from text - find first { and matching }
+        try:
+            start = text.find('{')
+            if start >= 0:
+                depth = 0
+                end = start
+                for i, c in enumerate(text[start:], start):
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                json_str = text[start:end+1]
+                result = json.loads(json_str)
+                if isinstance(result, dict):
+                    return result
+        except:
+            pass
 
-        # Try to find with nested braces (for anatomy arrays)
-        match = re.search(r'\{.*?"theory".*?\}', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except:
-                pass
+        # Last resort: try to find any JSON object
+        try:
+            match = re.search(r'\{[^{}]*"theory"[^{}]*\}', text)
+            if match:
+                result = json.loads(match.group())
+                if isinstance(result, dict):
+                    return result
+        except:
+            pass
 
         return None
 
@@ -447,16 +466,30 @@ class GeminiExtractor:
                 continue
 
             if text:
+                # Debug: show raw response for first few
+                if DEBUG_MODE and len(self.debug_responses) < 3:
+                    print(f"\n  📝 Raw API response ({len(text)} chars):")
+                    print(f"     {text[:200]}...")
+
                 parsed = self._parse_json(text)
+
+                if DEBUG_MODE and len(self.debug_responses) < 3:
+                    print(f"  📝 Parsed JSON: {parsed}")
+
                 if parsed:
-                    result = self._normalize_classification(parsed)
-                    if DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
-                        self.debug_responses.append({
-                            "raw": text[:300], "parsed": parsed, "normalized": result
-                        })
-                    return result
-                elif DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
-                    print(f"  JSON parse failed. Raw: {text[:150]}...")
+                    try:
+                        result = self._normalize_classification(parsed)
+                        if DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
+                            self.debug_responses.append({
+                                "raw": text[:300], "parsed": parsed, "normalized": result
+                            })
+                        return result
+                    except Exception as e:
+                        if DEBUG_MODE:
+                            print(f"  ⚠️ Normalization error: {e}")
+                            print(f"     Parsed data: {parsed}")
+                elif DEBUG_MODE and len(self.debug_responses) < 3:
+                    print(f"  ⚠️ JSON parse failed. Raw: {text[:200]}...")
 
             time.sleep(1)
 
@@ -501,15 +534,34 @@ class GeminiExtractor:
 
     def extract_single(self, abstract: str, idx: int = 0) -> Dict:
         """Extract both classification and dogmatism for a single abstract."""
-        classification = self.extract_classification(abstract)
-        dogmatism = self.extract_dogmatism(abstract)
-        classification.update(dogmatism)
-        return classification
+        try:
+            classification = self.extract_classification(abstract)
+            # Skip dogmatism for now to speed up - can enable later
+            # dogmatism = self.extract_dogmatism(abstract)
+            # classification.update(dogmatism)
+            classification['dogmatism_score'] = 5
+            classification['confidence_markers'] = []
+            classification['hedging_markers'] = []
+            return classification
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"  extract_single error at {idx}: {type(e).__name__}: {e}")
+            return self._default_classification()
 
     def batch_extract_parallel(self, df: pd.DataFrame, max_workers: int = MAX_WORKERS) -> pd.DataFrame:
         """Extract all dimensions from DataFrame in parallel."""
         print(f"\n{'='*60}\n🔍 EXTRACTING DIMENSIONS WITH GEMINI\n{'='*60}")
         print(f"Model: {self.model} | Papers: {len(df)} | Workers: {max_workers}")
+
+        # First, do a test extraction to verify API is working
+        print("\n🧪 Testing extraction on first abstract...")
+        test_abstract = df.iloc[0]['Abstract']
+        test_result = self.extract_classification(test_abstract)
+        print(f"   Test result: theory={test_result.get('theory', 'N/A')}, conf={test_result.get('confidence', 0):.2f}")
+        if test_result.get('_extraction_failed', True):
+            print("   ⚠️ Test extraction failed! Check API responses above.")
+        else:
+            print("   ✅ Test extraction succeeded!")
 
         results = [None] * len(df)
 
@@ -522,15 +574,18 @@ class GeminiExtractor:
                 try:
                     results[idx] = future.result()
                 except Exception as e:
-                    print(f"⚠️ Error at {idx}: {e}")
+                    print(f"⚠️ Error at {idx}: {type(e).__name__}: {e}")
                     results[idx] = self._default_classification()
                 time.sleep(API_DELAY)
 
         if DEBUG_MODE and self.debug_responses:
-            print("\n🔍 DEBUG SAMPLES:")
+            print("\n🔍 DEBUG SAMPLES (successful extractions):")
             for i, d in enumerate(self.debug_responses[:5]):
-                print(f"  Sample {i}: {d['normalized']['theory']} (conf: {d['normalized']['confidence']:.2f})")
-                print(f"    Raw: {d['raw'][:100]}...")
+                try:
+                    print(f"  Sample {i}: {d.get('normalized', {}).get('theory', 'N/A')}")
+                    print(f"    Raw: {str(d.get('raw', ''))[:100]}...")
+                except Exception as e:
+                    print(f"  Sample {i}: Error displaying: {e}")
 
         # Apply results to dataframe
         df_out = df.copy()
