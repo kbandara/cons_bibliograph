@@ -33,23 +33,42 @@ Extracts 8 dimensions + dogmatism score per paper using Gemini LLM.
 """
 
 # =============================================================================
-# CELL 1: CONFIGURATION - EDIT THIS SECTION
+# CELL 1: CONFIGURATION
 # =============================================================================
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                        🔧 CONFIGURATION 🔧                                 ║
 # ╠═══════════════════════════════════════════════════════════════════════════╣
-# ║  Set your API key and output folder below before running                  ║
+# ║  API key loaded from .env file automatically                               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-GEMINI_API_KEY = ""  # <-- PASTE YOUR API KEY HERE
+def load_env_file(env_path: str = ".env") -> dict:
+    """Load environment variables from .env file."""
+    env_vars = {}
+    if os.path.exists(env_path):
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    env_vars[key.strip()] = value.strip().strip('"').strip("'")
+    return env_vars
+
+# Load from .env file
+import os
+_env = load_env_file()
+GEMINI_API_KEY = _env.get('GEMINI_API_KEY', os.environ.get('GEMINI_API_KEY', ''))
+
 OUTPUT_FOLDER = "./results"
 CSV_PATH = "cons_bib.csv"
-GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"  # Updated model
+
+# Model options: "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"
+# Try "gemini-2.0-flash" first - it's stable and fast
+GEMINI_MODEL = _env.get('GEMINI_MODEL', 'gemini-2.0-flash')
 EMBEDDING_MODEL = "text-embedding-004"
 
 MAX_WORKERS = 10
-API_DELAY = 0.1
+API_DELAY = 0.15
 MAX_RETRIES = 3
 EMBEDDING_BATCH_SIZE = 100
 
@@ -58,7 +77,7 @@ MIN_YEAR = 2000
 MAX_YEAR = 2025
 SCHISM_YEAR = 2015
 
-DEBUG_MODE = False
+DEBUG_MODE = True  # Enable to see API responses
 DEBUG_SAMPLE_SIZE = 10
 
 # =============================================================================
@@ -248,23 +267,34 @@ class GeminiExtractor:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": temperature,
-                "maxOutputTokens": 500,
-                "responseMimeType": "application/json"
+                "maxOutputTokens": 500
             }
         }
         try:
-            r = self.session.post(f"{self.base_url}?key={self.api_key}", json=payload, timeout=45)
+            r = self.session.post(f"{self.base_url}?key={self.api_key}", json=payload, timeout=60)
             if r.status_code == 429:
-                time.sleep(5)
+                time.sleep(10)
                 return None, "RATE_LIMITED"
             if r.status_code != 200:
-                return None, f"HTTP_{r.status_code}_{r.text[:100]}"
+                error_text = r.text[:200] if r.text else "No error text"
+                if DEBUG_MODE:
+                    print(f"  ⚠️ API Error {r.status_code}: {error_text}")
+                return None, f"HTTP_{r.status_code}"
             result = r.json()
             if 'candidates' in result and result['candidates']:
-                text = result['candidates'][0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                return text, "OK"
+                candidate = result['candidates'][0]
+                if 'content' in candidate and 'parts' in candidate['content']:
+                    text = candidate['content']['parts'][0].get('text', '')
+                    return text, "OK"
+                # Check for safety block
+                if candidate.get('finishReason') == 'SAFETY':
+                    return None, "SAFETY_BLOCKED"
             return None, "NO_CANDIDATES"
+        except requests.exceptions.Timeout:
+            return None, "TIMEOUT"
         except Exception as e:
+            if DEBUG_MODE:
+                print(f"  ⚠️ Exception: {str(e)[:100]}")
             return None, f"ERROR: {str(e)[:50]}"
 
     def _parse_json(self, text: str) -> Optional[Dict]:
@@ -410,6 +440,12 @@ class GeminiExtractor:
                 time.sleep(5 * (attempt + 1))
                 continue
 
+            if status != "OK":
+                if DEBUG_MODE and attempt == 0:
+                    print(f"  API status: {status}")
+                time.sleep(2)
+                continue
+
             if text:
                 parsed = self._parse_json(text)
                 if parsed:
@@ -419,6 +455,8 @@ class GeminiExtractor:
                             "raw": text[:300], "parsed": parsed, "normalized": result
                         })
                     return result
+                elif DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
+                    print(f"  JSON parse failed. Raw: {text[:150]}...")
 
             time.sleep(1)
 
@@ -436,6 +474,10 @@ class GeminiExtractor:
 
             if status == "RATE_LIMITED":
                 time.sleep(5 * (attempt + 1))
+                continue
+
+            if status != "OK":
+                time.sleep(2)
                 continue
 
             if text:
@@ -1582,11 +1624,26 @@ def run_full_audit(csv_path: str = CSV_PATH, api_key: str = GEMINI_API_KEY,
         except Exception as e:
             print(f"⚠️ Embedding-based analyses failed: {e}")
 
-    # Save results
-    df_classified.to_csv(os.path.join(output_folder, "classified_papers.csv"), index=False)
+    # Save results with error handling
+    csv_path = os.path.join(output_folder, "classified_papers.csv")
+    try:
+        df_classified.to_csv(csv_path, index=False)
+    except PermissionError:
+        # File might be open - try alternative name
+        alt_path = os.path.join(output_folder, f"classified_papers_{int(time.time())}.csv")
+        print(f"⚠️ Cannot write to {csv_path} (file in use). Saving to {alt_path}")
+        df_classified.to_csv(alt_path, index=False)
+        csv_path = alt_path
 
-    with open(os.path.join(output_folder, "results.json"), 'w') as f:
-        json.dump(results, f, indent=2, default=str)
+    json_path = os.path.join(output_folder, "results.json")
+    try:
+        with open(json_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+    except PermissionError:
+        alt_path = os.path.join(output_folder, f"results_{int(time.time())}.json")
+        print(f"⚠️ Cannot write to {json_path}. Saving to {alt_path}")
+        with open(alt_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
 
     # Final summary
     print(f"\n{'='*70}")
@@ -1608,11 +1665,67 @@ def run_full_audit(csv_path: str = CSV_PATH, api_key: str = GEMINI_API_KEY,
     return {'data': df_classified, 'results': results}
 
 
+def test_api_connection(api_key: str, model: str = GEMINI_MODEL) -> bool:
+    """Test the Gemini API connection with a simple request."""
+    print(f"\n{'='*60}")
+    print("🔌 TESTING API CONNECTION")
+    print(f"{'='*60}")
+    print(f"Model: {model}")
+    print(f"API Key: {'*' * 20}{api_key[-4:] if len(api_key) > 4 else '???'}")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [{"parts": [{"text": "Reply with just the word 'OK' if you can read this."}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 10}
+    }
+
+    try:
+        r = requests.post(f"{url}?key={api_key}", json=payload, timeout=30)
+        print(f"HTTP Status: {r.status_code}")
+
+        if r.status_code == 200:
+            result = r.json()
+            if 'candidates' in result:
+                text = result['candidates'][0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                print(f"Response: {text[:50]}")
+                print("✅ API connection successful!")
+                return True
+            else:
+                print(f"⚠️ Unexpected response: {str(result)[:200]}")
+        else:
+            print(f"❌ API Error: {r.text[:300]}")
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+
+    return False
+
+
 if __name__ == "__main__":
     print("=" * 70)
-    print("CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT v4.0")
+    print("    CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT v4.0")
     print("=" * 70)
-    print("\n1. Set your GEMINI_API_KEY in the configuration section")
-    print("2. Run: results = run_full_audit()")
-    print("\nOr with custom settings:")
-    print("   results = run_full_audit(csv_path='your_data.csv', output_folder='./output')")
+
+    # Check API key
+    if not GEMINI_API_KEY:
+        print("\n❌ ERROR: GEMINI_API_KEY not found!")
+        print("Please create a .env file with: GEMINI_API_KEY=your_key_here")
+        exit(1)
+
+    print(f"\n📁 CSV Path: {CSV_PATH}")
+    print(f"📁 Output Folder: {OUTPUT_FOLDER}")
+    print(f"🤖 Model: {GEMINI_MODEL}")
+
+    # Test API connection first
+    if not test_api_connection(GEMINI_API_KEY, GEMINI_MODEL):
+        print("\n❌ API connection failed. Please check your API key and model name.")
+        print("Available models: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro")
+        exit(1)
+
+    # Run the full audit
+    print("\n" + "=" * 70)
+    print("    STARTING FULL AUDIT")
+    print("=" * 70)
+
+    results = run_full_audit()
+
+    print("\n✅ Audit complete!")
