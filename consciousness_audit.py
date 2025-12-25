@@ -1,23 +1,34 @@
 """
 ================================================================================
-CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE v3.0
+CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE v4.0
 ================================================================================
 A comprehensive bibliometric analysis of consciousness theories:
 IIT (Integrated Information Theory), GNWT (Global Neuronal Workspace Theory),
 HOT (Higher-Order Theory), and RPT (Recurrent Processing Theory).
 
 ANALYSES:
-1-7: Original analyses (ConTraSt, Moving Goalposts, Adversarial, etc.)
-8: Semantic Space Clustering with UMAP visualization
-9: Hypothesis Testing (Implicit Bias, Schism, Insularity)
+1. ConTraSt Audit - Methodology predicts theory
+2. Moving Goalposts - Semantic drift over time
+3. Adversarial Index - Cross-theory engagement
+4. Neuro-Cartography - Brain region preferences
+5. Aggression Index - Hostile tone over time
+6. Easy vs Hard Problem - Phenomenology vs Function
+7. Model Organism - Subject preferences
+8. Semantic Space Clustering - UMAP visualization
+9. Hypothesis Testing - Statistical tests
+10. Methodology Predicts Theory - Yaron et al. replication
+11. Vocabulary Divergence - Echo chamber analysis
+12. Dogmatism Analysis - Epistemic confidence ratings
 
 KEY FEATURES:
-- "Fingerprint" classification with theory-specific markers
+- Robust "Fingerprint" classification with theory-specific markers
+- Separate Dogmatism/Epistemic Confidence scoring (1-10)
 - Gemini text-embedding-004 for semantic embeddings
 - UMAP dimensionality reduction
 - Statistical hypothesis testing
+- Vocabulary divergence over time (echo chamber detection)
 
-Extracts 8 dimensions per paper using Gemini LLM.
+Extracts 8 dimensions + dogmatism score per paper using Gemini LLM.
 ================================================================================
 """
 
@@ -34,11 +45,11 @@ Extracts 8 dimensions per paper using Gemini LLM.
 GEMINI_API_KEY = ""  # <-- PASTE YOUR API KEY HERE
 OUTPUT_FOLDER = "./results"
 CSV_PATH = "cons_bib.csv"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"  # Updated model
 EMBEDDING_MODEL = "text-embedding-004"
 
-MAX_WORKERS = 5
-API_DELAY = 0.2
+MAX_WORKERS = 10
+API_DELAY = 0.1
 MAX_RETRIES = 3
 EMBEDDING_BATCH_SIZE = 100
 
@@ -48,7 +59,7 @@ MAX_YEAR = 2025
 SCHISM_YEAR = 2015
 
 DEBUG_MODE = False
-DEBUG_SAMPLE_SIZE = 5
+DEBUG_SAMPLE_SIZE = 10
 
 # =============================================================================
 # CELL 2: INSTALLATION
@@ -76,6 +87,7 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
 from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cosine, euclidean
 from scipy import stats
@@ -120,135 +132,401 @@ def extract_first_sentences(text: str, n: int = 2) -> str:
     return ' '.join(re.split(r'(?<=[.!?])\s+', text.strip())[:n])
 
 # =============================================================================
-# CELL 5: FINGERPRINT PROMPT
+# CELL 5: CLASSIFICATION PROMPT (IMPROVED)
 # =============================================================================
 
-FINGERPRINT_PROMPT = '''You are an expert in consciousness science. Classify this abstract by detecting theoretical "fingerprints".
+CLASSIFICATION_PROMPT = '''Classify this neuroscience abstract. Detect theory "fingerprints" carefully.
 
 ABSTRACT:
 {abstract}
 
-THEORY FINGERPRINTS:
+=== THEORY FINGERPRINTS ===
 
-🔵 IIT Markers: "Phi" (Φ), "integrated information", "differentiation" + "integration", "cause-effect structure", "posterior hot zone", "maximally irreducible", "exclusion postulate", "qualia space". Authors: Tononi, Koch, Massimini, Boly
+IIT (Integrated Information Theory):
+- Keywords: "Phi" (Φ), "integrated information", "differentiation + integration", "cause-effect structure", "posterior hot zone", "maximally irreducible", "exclusion postulate", "intrinsic causal power"
+- Authors: Tononi, Koch, Massimini, Boly, Casali
 
-🟢 GNWT Markers: "Global workspace", "ignition", "P3b"/"P300", "broadcasting", "long-distance connectivity", "fronto-parietal", "access consciousness", "late cortical activity" (300-500ms). Authors: Dehaene, Baars, Changeux, Sergent
+GNWT (Global Neuronal Workspace Theory):
+- Keywords: "Global workspace", "ignition", "P3b"/"P300", "broadcasting", "long-distance connectivity", "fronto-parietal", "access consciousness", "late cortical activity" (>300ms), "prefrontal amplification"
+- Authors: Dehaene, Baars, Changeux, Sergent, Naccache
 
-🟡 HOT Markers: "Higher-order thought", "higher-order representation", "meta-cognition", "awareness of awareness", "second-order", "introspection" as mechanism, "prefrontal" for awareness. Authors: Rosenthal, Lau, Brown, LeDoux
+HOT (Higher-Order Theory):
+- Keywords: "Higher-order thought/representation", "meta-cognition", "awareness of awareness", "second-order", "introspection mechanism", "prefrontal for awareness"
+- Authors: Rosenthal, Lau, Brown, LeDoux, Fleming
 
-🔴 RPT Markers: "Local recurrence" in SENSORY areas, "re-entrant processing" in visual cortex, "feedback within V1/V2/V4", "feedforward vs feedback" in sensory processing. Authors: Lamme, Super, Fahrenfort
-⚠️ NOT RPT: "feedback from PFC", "top-down attention from frontal areas", "fronto-parietal recurrence" (these are GNWT!)
+RPT (Recurrent Processing Theory):
+- Keywords: "Local recurrence in SENSORY cortex", "re-entrant processing in V1/V2/V4", "feedforward vs feedback in visual areas", "recurrent loops in occipital/temporal cortex"
+- Authors: Lamme, Super, Fahrenfort, Scholte
+- ⚠️ NOT RPT if: mentions "prefrontal feedback", "global workspace", "fronto-parietal"
 
-🔘 NEUTRAL: No clear theory fingerprints, methodology paper, or equally supports multiple theories.
+NEUTRAL: No clear theory markers, purely methodological, or equally discusses multiple theories.
 
-OTHER DIMENSIONS:
-2. PARADIGM: Report / No-Report
-3. TYPE: Content / State
-4. EPISTEMIC: A Priori / Post-Hoc
-5. ANATOMY: Top 3 brain regions ["PFC", "V1"] or ["None"]
-6. TONE toward rivals: Dismissive / Critical / Constructive / Neutral
-7. TARGET: Phenomenology / Function / Mechanism
-8. SUBJECT: Human / Clinical / Animal / Simulation / Review
+=== OTHER DIMENSIONS ===
 
-Respond ONLY with JSON:
-{{"theory":"IIT","paradigm":"Report","type":"Content","epistemic":"A Priori","anatomy":["PFC"],"tone":"Neutral","target":"Function","subject":"Human","confidence":0.85,"fingerprints_found":["phi","posterior hot zone"]}}'''
+PARADIGM:
+- "Report" = participants report conscious experience (verbal report, button press for seen/not seen)
+- "No-Report" = measures consciousness without reports (no-report paradigms, implicit measures, brain-only)
+
+TYPE:
+- "Content" = WHAT is conscious (visual features, objects, colors, specific percepts)
+- "State" = WHETHER conscious (awake vs anesthesia, sleep vs wake, disorders of consciousness)
+
+EPISTEMIC:
+- "A Priori" = derives predictions FROM theory before testing (theory-driven hypothesis)
+- "Post-Hoc" = tests existing data or no explicit theoretical prediction
+
+ANATOMY: List up to 3 brain regions mentioned (e.g., ["PFC", "V1", "parietal"]) or ["none"]
+
+TONE toward rival theories:
+- "Dismissive" = strong criticism, "refutes", "falsifies", "disproves"
+- "Critical" = challenges, questions, "problematic for"
+- "Constructive" = acknowledges strengths, seeks integration
+- "Neutral" = no mention of other theories
+
+TARGET:
+- "Phenomenology" = subjective experience, qualia, what-it-is-like
+- "Function" = cognitive function, access, report, behavior
+- "Mechanism" = neural mechanism, implementation, substrate
+
+SUBJECT:
+- "Human" = healthy human participants
+- "Clinical" = patients, disorders of consciousness, brain injury
+- "Animal" = non-human animals
+- "Simulation" = computational models, simulations
+- "Review" = review paper, meta-analysis, theoretical paper
+
+Return ONLY valid JSON (no markdown, no explanation):
+{"theory":"IIT|GNWT|HOT|RPT|Neutral","paradigm":"Report|No-Report","type":"Content|State","epistemic":"A Priori|Post-Hoc","anatomy":["region1","region2"],"tone":"Dismissive|Critical|Constructive|Neutral","target":"Phenomenology|Function|Mechanism","subject":"Human|Clinical|Animal|Simulation|Review","confidence":0.0-1.0,"fingerprints":["found","markers"]}'''
 
 # =============================================================================
-# CELL 6: GEMINI EXTRACTOR
+# CELL 6: DOGMATISM PROMPT (NEW)
+# =============================================================================
+
+DOGMATISM_PROMPT = '''Rate the epistemic confidence/dogmatism of this abstract on a scale of 1-10.
+
+ABSTRACT:
+{abstract}
+
+SCORING GUIDE:
+
+HIGH DOGMATISM (8-10):
+- Words: "proves", "demonstrates conclusively", "establishes", "fundamental law", "definitive", "unequivocal", "certain", "must be", "the only explanation"
+- Tone: Absolute certainty, dismissive of alternatives, grandiose claims
+
+MODERATE CONFIDENCE (5-7):
+- Words: "shows", "indicates", "supports", "evidence for", "consistent with", "confirms"
+- Tone: Confident but acknowledges limits
+
+LOW DOGMATISM (1-4):
+- Words: "suggests", "may", "might", "could", "hypothesis", "preliminary", "tentative", "one possibility", "remains unclear"
+- Tone: Humble, acknowledges uncertainty, open to alternatives
+
+MARKERS TO LOOK FOR:
+- Grandiosity markers: "fundamental", "revolutionary", "paradigm shift", "solves the hard problem"
+- Certainty markers: "proves", "demonstrates", "establishes beyond doubt"
+- Hedging markers: "suggests", "may indicate", "preliminary evidence"
+- Humility markers: "limitations include", "further research needed", "one interpretation"
+
+Return ONLY valid JSON:
+{"dogmatism_score":1-10,"confidence_markers":["list","of","markers","found"],"hedging_markers":["list","of","hedges"],"reasoning":"brief explanation"}'''
+
+# =============================================================================
+# CELL 7: GEMINI EXTRACTOR (IMPROVED)
 # =============================================================================
 
 class GeminiExtractor:
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+    def __init__(self, api_key: str, model: str = GEMINI_MODEL):
         self.api_key, self.model = api_key, model
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         self.session = requests.Session()
         self.debug_responses = []
         if not api_key: raise ValueError("❌ GEMINI_API_KEY not set!")
 
-    def _call_gemini(self, abstract: str) -> Tuple[Dict, str]:
-        payload = {"contents": [{"parts": [{"text": FINGERPRINT_PROMPT.format(abstract=abstract[:2500])}]}],
-                   "generationConfig": {"temperature": 0.0, "maxOutputTokens": 300}}
+    def _call_api(self, prompt: str, temperature: float = 0.1) -> Tuple[Optional[str], str]:
+        """Make API call and return raw text response."""
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": 500,
+                "responseMimeType": "application/json"
+            }
+        }
         try:
-            r = self.session.post(f"{self.base_url}?key={self.api_key}", json=payload, timeout=30)
-            if r.status_code == 429: time.sleep(3); return {"_retry": True}, "RATE_LIMITED"
-            if r.status_code != 200: return self._default(), f"HTTP_{r.status_code}"
+            r = self.session.post(f"{self.base_url}?key={self.api_key}", json=payload, timeout=45)
+            if r.status_code == 429:
+                time.sleep(5)
+                return None, "RATE_LIMITED"
+            if r.status_code != 200:
+                return None, f"HTTP_{r.status_code}_{r.text[:100]}"
             result = r.json()
             if 'candidates' in result and result['candidates']:
-                raw = result['candidates'][0]['content']['parts'][0].get('text', '')
-                return self._parse(raw), raw
-            return self._default(), "NO_CANDIDATES"
-        except Exception as e: return self._default(), str(e)[:50]
+                text = result['candidates'][0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                return text, "OK"
+            return None, "NO_CANDIDATES"
+        except Exception as e:
+            return None, f"ERROR: {str(e)[:50]}"
 
-    def _parse(self, text: str) -> Dict:
-        text = re.sub(r'^```json\s*\n?|```\s*$', '', text.strip())
-        try: return self._normalize(json.loads(text))
-        except: pass
-        m = re.search(r'\{[^{}]*"theory"[^{}]*\}', text, re.I | re.DOTALL)
-        if m:
-            try: return self._normalize(json.loads(m.group()))
-            except: pass
-        return self._default()
+    def _parse_json(self, text: str) -> Optional[Dict]:
+        """Parse JSON from response text."""
+        if not text:
+            return None
+        # Clean up markdown formatting
+        text = re.sub(r'^```(?:json)?\s*\n?', '', text.strip())
+        text = re.sub(r'\n?```\s*$', '', text)
+        text = text.strip()
 
-    def _normalize(self, d: Dict) -> Dict:
-        r = self._default()
-        t = str(d.get("theory", "")).upper()
-        r["theory"] = t if t in ["IIT", "GNWT", "HOT", "RPT"] else "Neutral"
-        r["paradigm"] = "No-Report" if "no" in str(d.get("paradigm", "")).lower() else "Report"
-        r["type"] = "State" if "state" in str(d.get("type", "")).lower() else "Content"
-        r["epistemic"] = "A Priori" if "priori" in str(d.get("epistemic", "")).lower() else "Post-Hoc"
+        # Try direct parse
+        try:
+            return json.loads(text)
+        except:
+            pass
+
+        # Try to find JSON object
+        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                pass
+
+        # Try to find with nested braces (for anatomy arrays)
+        match = re.search(r'\{.*?"theory".*?\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                pass
+
+        return None
+
+    def _default_classification(self) -> Dict:
+        return {
+            "theory": "Neutral", "paradigm": "Report", "type": "Content",
+            "epistemic": "Post-Hoc", "anatomy": [], "tone": "Neutral",
+            "target": "Function", "subject": "Human", "confidence": 0.0,
+            "fingerprints": [], "dogmatism_score": 5, "confidence_markers": [],
+            "hedging_markers": [], "_extraction_failed": True
+        }
+
+    def _normalize_classification(self, d: Dict) -> Dict:
+        """Normalize parsed JSON to expected format."""
+        r = self._default_classification()
+        r["_extraction_failed"] = False
+
+        # Theory - must be exact match
+        theory = str(d.get("theory", "")).strip().upper()
+        if theory in ["IIT", "GNWT", "HOT", "RPT"]:
+            r["theory"] = theory
+        elif "IIT" in theory or "INTEGRATED" in theory:
+            r["theory"] = "IIT"
+        elif "GNWT" in theory or "GNW" in theory or "GLOBAL" in theory or "WORKSPACE" in theory:
+            r["theory"] = "GNWT"
+        elif "HOT" in theory or "HIGHER" in theory:
+            r["theory"] = "HOT"
+        elif "RPT" in theory or "RECURRENT" in theory:
+            r["theory"] = "RPT"
+        else:
+            r["theory"] = "Neutral"
+
+        # Paradigm
+        paradigm = str(d.get("paradigm", "")).lower()
+        r["paradigm"] = "No-Report" if "no" in paradigm or "implicit" in paradigm else "Report"
+
+        # Type
+        type_val = str(d.get("type", "")).lower()
+        r["type"] = "State" if "state" in type_val else "Content"
+
+        # Epistemic
+        epistemic = str(d.get("epistemic", "")).lower()
+        r["epistemic"] = "A Priori" if "priori" in epistemic or "a pri" in epistemic else "Post-Hoc"
+
+        # Anatomy
         anat = d.get("anatomy", [])
-        r["anatomy"] = [str(a).strip() for a in (anat if isinstance(anat, list) else anat.split(",")) if a and str(a).lower() != "none"][:3]
+        if isinstance(anat, str):
+            anat = [a.strip() for a in anat.split(",")]
+        if isinstance(anat, list):
+            r["anatomy"] = [str(a).strip().upper() for a in anat
+                          if a and str(a).lower() not in ["none", "null", ""]][:3]
+
+        # Tone
         tone = str(d.get("tone", "")).lower()
-        r["tone"] = "Dismissive" if "dismiss" in tone else "Critical" if "critic" in tone else "Constructive" if "construct" in tone else "Neutral"
-        tgt = str(d.get("target", "")).lower()
-        r["target"] = "Phenomenology" if "phenom" in tgt else "Mechanism" if "mechan" in tgt else "Function"
-        subj = str(d.get("subject", "")).lower()
-        r["subject"] = "Clinical" if "clinical" in subj else "Animal" if "animal" in subj else "Simulation" if "simul" in subj else "Review" if "review" in subj else "Human"
-        r["confidence"] = float(d.get("confidence", 0.7))
-        r["fingerprints_found"] = d.get("fingerprints_found", [])
+        if "dismiss" in tone:
+            r["tone"] = "Dismissive"
+        elif "critic" in tone:
+            r["tone"] = "Critical"
+        elif "construct" in tone:
+            r["tone"] = "Constructive"
+        else:
+            r["tone"] = "Neutral"
+
+        # Target
+        target = str(d.get("target", "")).lower()
+        if "phenom" in target or "qualia" in target or "subjective" in target:
+            r["target"] = "Phenomenology"
+        elif "mechan" in target or "neural" in target or "implement" in target:
+            r["target"] = "Mechanism"
+        else:
+            r["target"] = "Function"
+
+        # Subject
+        subject = str(d.get("subject", "")).lower()
+        if "clinical" in subject or "patient" in subject or "disorder" in subject:
+            r["subject"] = "Clinical"
+        elif "animal" in subject or "monkey" in subject or "mouse" in subject:
+            r["subject"] = "Animal"
+        elif "simul" in subject or "model" in subject or "comput" in subject:
+            r["subject"] = "Simulation"
+        elif "review" in subject or "meta" in subject or "theoret" in subject:
+            r["subject"] = "Review"
+        else:
+            r["subject"] = "Human"
+
+        # Confidence
+        try:
+            conf = float(d.get("confidence", 0.5))
+            r["confidence"] = max(0.0, min(1.0, conf))
+        except:
+            r["confidence"] = 0.5
+
+        # Fingerprints
+        fp = d.get("fingerprints", d.get("fingerprints_found", []))
+        if isinstance(fp, list):
+            r["fingerprints"] = [str(f) for f in fp]
+
         return r
 
-    def _default(self) -> Dict:
-        return {"theory": "Neutral", "paradigm": "Report", "type": "Content", "epistemic": "Post-Hoc",
-                "anatomy": [], "tone": "Neutral", "target": "Function", "subject": "Human",
-                "confidence": 0.0, "fingerprints_found": []}
+    def extract_classification(self, abstract: str) -> Dict:
+        """Extract classification for a single abstract."""
+        if pd.isna(abstract) or len(str(abstract)) < 50:
+            return self._default_classification()
+
+        prompt = CLASSIFICATION_PROMPT.format(abstract=str(abstract)[:3000])
+
+        for attempt in range(MAX_RETRIES):
+            text, status = self._call_api(prompt, temperature=0.1)
+
+            if status == "RATE_LIMITED":
+                time.sleep(5 * (attempt + 1))
+                continue
+
+            if text:
+                parsed = self._parse_json(text)
+                if parsed:
+                    result = self._normalize_classification(parsed)
+                    if DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
+                        self.debug_responses.append({
+                            "raw": text[:300], "parsed": parsed, "normalized": result
+                        })
+                    return result
+
+            time.sleep(1)
+
+        return self._default_classification()
+
+    def extract_dogmatism(self, abstract: str) -> Dict:
+        """Extract dogmatism score for a single abstract."""
+        if pd.isna(abstract) or len(str(abstract)) < 50:
+            return {"dogmatism_score": 5, "confidence_markers": [], "hedging_markers": [], "reasoning": ""}
+
+        prompt = DOGMATISM_PROMPT.format(abstract=str(abstract)[:3000])
+
+        for attempt in range(MAX_RETRIES):
+            text, status = self._call_api(prompt, temperature=0.1)
+
+            if status == "RATE_LIMITED":
+                time.sleep(5 * (attempt + 1))
+                continue
+
+            if text:
+                parsed = self._parse_json(text)
+                if parsed:
+                    try:
+                        score = int(parsed.get("dogmatism_score", 5))
+                        score = max(1, min(10, score))
+                    except:
+                        score = 5
+                    return {
+                        "dogmatism_score": score,
+                        "confidence_markers": parsed.get("confidence_markers", []),
+                        "hedging_markers": parsed.get("hedging_markers", []),
+                        "reasoning": parsed.get("reasoning", "")
+                    }
+
+            time.sleep(1)
+
+        return {"dogmatism_score": 5, "confidence_markers": [], "hedging_markers": [], "reasoning": ""}
 
     def extract_single(self, abstract: str, idx: int = 0) -> Dict:
-        if pd.isna(abstract) or len(str(abstract)) < 50: return self._default()
-        for attempt in range(MAX_RETRIES):
-            result, raw = self._call_gemini(str(abstract))
-            if DEBUG_MODE and len(self.debug_responses) < DEBUG_SAMPLE_SIZE:
-                self.debug_responses.append({"idx": idx, "raw": raw[:500], "parsed": result})
-            if result.get("_retry"): time.sleep(2 * (attempt + 1)); continue
-            return result
-        return self._default()
+        """Extract both classification and dogmatism for a single abstract."""
+        classification = self.extract_classification(abstract)
+        dogmatism = self.extract_dogmatism(abstract)
+        classification.update(dogmatism)
+        return classification
 
-    def batch_extract_parallel(self, df: pd.DataFrame, max_workers: int = 5) -> pd.DataFrame:
-        print(f"\n{'='*60}\n🔍 FINGERPRINT CLASSIFICATION\n{'='*60}")
+    def batch_extract_parallel(self, df: pd.DataFrame, max_workers: int = MAX_WORKERS) -> pd.DataFrame:
+        """Extract all dimensions from DataFrame in parallel."""
+        print(f"\n{'='*60}\n🔍 EXTRACTING DIMENSIONS WITH GEMINI\n{'='*60}")
         print(f"Model: {self.model} | Papers: {len(df)} | Workers: {max_workers}")
+
         results = [None] * len(df)
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(self.extract_single, row['Abstract'], i): i for i, row in df.iterrows()}
-            for f in tqdm(as_completed(futures), total=len(df), desc="Classifying"):
-                results[futures[f]] = f.result()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.extract_single, row['Abstract'], i): i
+                      for i, row in df.iterrows()}
+
+            for future in tqdm(as_completed(futures), total=len(df), desc="Extracting"):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    print(f"⚠️ Error at {idx}: {e}")
+                    results[idx] = self._default_classification()
                 time.sleep(API_DELAY)
+
         if DEBUG_MODE and self.debug_responses:
             print("\n🔍 DEBUG SAMPLES:")
-            for d in self.debug_responses: print(f"  {d['idx']}: {d['parsed']['theory']}")
+            for i, d in enumerate(self.debug_responses[:5]):
+                print(f"  Sample {i}: {d['normalized']['theory']} (conf: {d['normalized']['confidence']:.2f})")
+                print(f"    Raw: {d['raw'][:100]}...")
+
+        # Apply results to dataframe
         df_out = df.copy()
-        for k in ['theory', 'paradigm', 'type', 'epistemic', 'anatomy', 'tone', 'target', 'subject', 'confidence', 'fingerprints_found']:
-            df_out[k] = [r.get(k, self._default()[k]) for r in results]
+        keys = ['theory', 'paradigm', 'type', 'epistemic', 'anatomy', 'tone', 'target',
+                'subject', 'confidence', 'fingerprints', 'dogmatism_score',
+                'confidence_markers', 'hedging_markers', '_extraction_failed']
+
+        for k in keys:
+            default = self._default_classification().get(k, None)
+            df_out[k] = [r.get(k, default) if r else default for r in results]
+
+        # Print statistics
+        print(f"\n📊 Extraction Statistics:")
+        failed = df_out['_extraction_failed'].sum()
+        print(f"   Extraction failures: {failed} ({failed/len(df_out)*100:.1f}%)")
+        print(f"   Mean confidence: {df_out['confidence'].mean():.3f}")
+        print(f"   Mean dogmatism: {df_out['dogmatism_score'].mean():.2f}")
+
         print(f"\n📊 Theory distribution:")
         for t, c in df_out['theory'].value_counts().items():
             print(f"   {t}: {c} ({c/len(df_out)*100:.1f}%)")
+
+        print(f"\n📊 Paradigm distribution:")
+        for p, c in df_out['paradigm'].value_counts().items():
+            print(f"   {p}: {c} ({c/len(df_out)*100:.1f}%)")
+
+        print(f"\n📊 Tone distribution:")
+        for t, c in df_out['tone'].value_counts().items():
+            print(f"   {t}: {c} ({c/len(df_out)*100:.1f}%)")
+
         return df_out
 
 # =============================================================================
-# CELL 7: GEMINI EMBEDDER
+# CELL 8: GEMINI EMBEDDER
 # =============================================================================
 
 class GeminiEmbedder:
-    def __init__(self, api_key: str, model: str = "text-embedding-004"):
+    def __init__(self, api_key: str, model: str = EMBEDDING_MODEL):
         self.api_key, self.model = api_key, model
         self.batch_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
         self.session = requests.Session()
@@ -257,311 +535,1084 @@ class GeminiEmbedder:
         print(f"\n{'='*60}\n🧮 GENERATING EMBEDDINGS\n{'='*60}")
         print(f"Model: {self.model} | Texts: {len(texts)}")
         embeddings = [None] * len(texts)
+
         for start in tqdm(range(0, len(texts), batch_size), desc="Embedding"):
             batch = texts[start:start + batch_size]
             reqs, idxs = [], []
+
             for i, t in enumerate(batch):
                 if t and len(str(t)) >= 10:
-                    reqs.append({"model": f"models/{self.model}", "content": {"parts": [{"text": str(t)[:2000]}]}})
+                    reqs.append({
+                        "model": f"models/{self.model}",
+                        "content": {"parts": [{"text": str(t)[:2000]}]}
+                    })
                     idxs.append(start + i)
-            if not reqs: continue
-            try:
-                r = self.session.post(f"{self.batch_url}?key={self.api_key}", json={"requests": reqs}, timeout=60)
-                if r.status_code == 429: time.sleep(30); continue
-                r.raise_for_status()
-                for j, emb in enumerate(r.json().get('embeddings', [])):
-                    if 'values' in emb: embeddings[idxs[j]] = np.array(emb['values'])
-            except Exception as e: print(f"⚠️ Batch error: {e}")
-            time.sleep(0.5)
-        print(f"✅ Embedded: {sum(1 for e in embeddings if e is not None)}/{len(texts)}")
+
+            if not reqs:
+                continue
+
+            for attempt in range(3):
+                try:
+                    r = self.session.post(
+                        f"{self.batch_url}?key={self.api_key}",
+                        json={"requests": reqs},
+                        timeout=60
+                    )
+                    if r.status_code == 429:
+                        time.sleep(30 * (attempt + 1))
+                        continue
+                    r.raise_for_status()
+
+                    for j, emb in enumerate(r.json().get('embeddings', [])):
+                        if 'values' in emb:
+                            embeddings[idxs[j]] = np.array(emb['values'])
+                    break
+                except Exception as e:
+                    print(f"⚠️ Batch error (attempt {attempt+1}): {e}")
+                    time.sleep(5)
+
+            time.sleep(0.3)
+
+        embedded_count = sum(1 for e in embeddings if e is not None)
+        print(f"✅ Embedded: {embedded_count}/{len(texts)} ({embedded_count/len(texts)*100:.1f}%)")
         return embeddings
 
 # =============================================================================
-# CELL 8: SEMANTIC CLUSTERING
+# CELL 9: RULE-BASED FALLBACK
+# =============================================================================
+
+class RuleBasedExtractor:
+    """Fallback extractor using keyword matching."""
+
+    FINGERPRINTS = {
+        'IIT': ['integrated information', 'phi', 'tononi', 'cause-effect', 'posterior hot zone',
+                'maximally irreducible', 'exclusion postulate', 'intrinsic causal', 'differentiation'],
+        'GNWT': ['global workspace', 'dehaene', 'baars', 'ignition', 'broadcasting', 'p3b', 'p300',
+                 'fronto-parietal', 'access consciousness', 'long-distance', 'prefrontal'],
+        'HOT': ['higher-order', 'rosenthal', 'metacognition', 'meta-cognition', 'awareness of awareness',
+                'lau', 'second-order', 'introspection'],
+        'RPT': ['recurrent processing', 'lamme', 'local recurrence', 'feedforward sweep',
+                'reentrant', 're-entrant', 'fahrenfort']
+    }
+
+    RPT_EXCLUSIONS = ['prefrontal', 'frontal feedback', 'global workspace', 'fronto-parietal']
+
+    PARADIGM_NOREPORT = ['no-report', 'implicit', 'without report', 'brain-only', 'no report']
+    PARADIGM_REPORT = ['verbal report', 'button press', 'subjective report', 'reported']
+
+    TYPE_STATE = ['anesthesia', 'sleep', 'wake', 'disorders of consciousness', 'vegetative',
+                  'minimally conscious', 'coma', 'sedation']
+    TYPE_CONTENT = ['visual', 'auditory', 'color', 'motion', 'object', 'face', 'word']
+
+    TONE_DISMISSIVE = ['refutes', 'falsifies', 'disproves', 'fails to', 'cannot explain', 'fatal flaw']
+    TONE_CRITICAL = ['challenges', 'questions', 'problematic', 'limitation', 'weakness']
+    TONE_CONSTRUCTIVE = ['integrates', 'bridges', 'combines', 'complementary', 'synthesis']
+
+    DOGMATISM_HIGH = ['proves', 'demonstrates conclusively', 'establishes', 'fundamental',
+                      'definitive', 'unequivocal', 'certain', 'must be', 'the only']
+    DOGMATISM_LOW = ['suggests', 'may', 'might', 'could', 'hypothesis', 'preliminary',
+                     'tentative', 'possibly', 'unclear', 'speculative']
+
+    def extract(self, abstract: str) -> Dict:
+        if pd.isna(abstract):
+            return self._default()
+
+        text = ' ' + str(abstract).lower() + ' '
+
+        # Theory detection
+        scores = {t: sum(1 for k in kws if k in text) for t, kws in self.FINGERPRINTS.items()}
+
+        # RPT exclusion check
+        if scores.get('RPT', 0) > 0:
+            for ex in self.RPT_EXCLUSIONS:
+                if ex in text:
+                    scores['RPT'] = max(0, scores['RPT'] - 2)
+
+        theory = max(scores, key=scores.get) if max(scores.values()) > 0 else "Neutral"
+        confidence = min(max(scores.values()) / 3, 1.0) if max(scores.values()) > 0 else 0.0
+
+        # Paradigm
+        noreport = sum(1 for k in self.PARADIGM_NOREPORT if k in text)
+        report = sum(1 for k in self.PARADIGM_REPORT if k in text)
+        paradigm = "No-Report" if noreport > report else "Report"
+
+        # Type
+        state = sum(1 for k in self.TYPE_STATE if k in text)
+        content = sum(1 for k in self.TYPE_CONTENT if k in text)
+        type_val = "State" if state > content else "Content"
+
+        # Tone
+        dismissive = sum(1 for k in self.TONE_DISMISSIVE if k in text)
+        critical = sum(1 for k in self.TONE_CRITICAL if k in text)
+        constructive = sum(1 for k in self.TONE_CONSTRUCTIVE if k in text)
+
+        if dismissive > 0:
+            tone = "Dismissive"
+        elif critical > constructive:
+            tone = "Critical"
+        elif constructive > 0:
+            tone = "Constructive"
+        else:
+            tone = "Neutral"
+
+        # Dogmatism
+        high = sum(1 for k in self.DOGMATISM_HIGH if k in text)
+        low = sum(1 for k in self.DOGMATISM_LOW if k in text)
+        dogmatism = 5 + high - low
+        dogmatism = max(1, min(10, dogmatism))
+
+        return {
+            "theory": theory, "paradigm": paradigm, "type": type_val,
+            "epistemic": "Post-Hoc", "anatomy": [], "tone": tone,
+            "target": "Function", "subject": "Human", "confidence": confidence,
+            "fingerprints": [], "dogmatism_score": dogmatism,
+            "confidence_markers": [], "hedging_markers": [],
+            "_extraction_failed": False
+        }
+
+    def _default(self):
+        return {
+            "theory": "Neutral", "paradigm": "Report", "type": "Content",
+            "epistemic": "Post-Hoc", "anatomy": [], "tone": "Neutral",
+            "target": "Function", "subject": "Human", "confidence": 0.0,
+            "fingerprints": [], "dogmatism_score": 5,
+            "confidence_markers": [], "hedging_markers": [],
+            "_extraction_failed": True
+        }
+
+    def batch_extract(self, df: pd.DataFrame) -> pd.DataFrame:
+        print(f"\n{'='*60}\n📝 RULE-BASED EXTRACTION (FALLBACK)\n{'='*60}")
+        results = [self.extract(row['Abstract']) for _, row in tqdm(df.iterrows(), total=len(df))]
+        df_out = df.copy()
+        for k in results[0].keys():
+            df_out[k] = [r[k] for r in results]
+
+        print(f"\n📊 Theory distribution:")
+        for t, c in df_out['theory'].value_counts().items():
+            print(f"   {t}: {c} ({c/len(df_out)*100:.1f}%)")
+        return df_out
+
+# =============================================================================
+# CELL 10: SEMANTIC CLUSTERING
 # =============================================================================
 
 def run_semantic_clustering(df: pd.DataFrame, embeddings: List, output_folder: str) -> Dict:
     print(f"\n{'='*60}\n🌌 SEMANTIC CLUSTERING\n{'='*60}")
-    if not UMAP_AVAILABLE or not MATPLOTLIB_AVAILABLE: return {"error": "Missing dependencies"}
+
+    if not UMAP_AVAILABLE or not MATPLOTLIB_AVAILABLE:
+        print("⚠️ Missing dependencies (umap-learn or matplotlib)")
+        return {"error": "Missing dependencies"}
+
     valid_mask = [e is not None for e in embeddings]
-    X = np.vstack([e for e in embeddings if e is not None])
-    valid_df = df[valid_mask].copy()
-    if len(X) < 50: return {"error": "Insufficient embeddings"}
-    print(f"Valid: {len(X)} | Shape: {X.shape}")
+    valid_embeddings = [e for e in embeddings if e is not None]
+
+    if len(valid_embeddings) < 50:
+        print("⚠️ Insufficient embeddings for clustering")
+        return {"error": "Insufficient embeddings"}
+
+    X = np.vstack(valid_embeddings)
+    valid_df = df[valid_mask].copy().reset_index(drop=True)
+
+    print(f"Valid embeddings: {len(X)} | Shape: {X.shape}")
+
+    # UMAP reduction
     reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='cosine', random_state=42)
     X_2d = reducer.fit_transform(X)
+
     valid_df['umap_x'], valid_df['umap_y'] = X_2d[:, 0], X_2d[:, 1]
+
+    # Plot semantic space
     plt.figure(figsize=(14, 10))
     colors = {'IIT': '#E63946', 'GNWT': '#457B9D', 'HOT': '#2A9D8F', 'RPT': '#E9C46A', 'Neutral': '#CCCCCC'}
-    for t in ['Neutral', 'IIT', 'GNWT', 'HOT', 'RPT']:
-        m = valid_df['theory'] == t
-        if m.sum(): plt.scatter(valid_df.loc[m, 'umap_x'], valid_df.loc[m, 'umap_y'], c=colors[t],
-                                label=f"{t} (n={m.sum()})", alpha=0.6 if t == 'Neutral' else 0.8, s=30 if t == 'Neutral' else 50)
-    plt.xlabel('UMAP 1'); plt.ylabel('UMAP 2'); plt.title('Semantic Space by Theory'); plt.legend()
-    plt.savefig(os.path.join(output_folder, "8_semantic_space.png"), dpi=300, bbox_inches='tight'); plt.close()
+
+    for theory in ['Neutral', 'IIT', 'GNWT', 'HOT', 'RPT']:
+        mask = valid_df['theory'] == theory
+        if mask.sum() > 0:
+            alpha = 0.3 if theory == 'Neutral' else 0.8
+            size = 20 if theory == 'Neutral' else 50
+            plt.scatter(valid_df.loc[mask, 'umap_x'], valid_df.loc[mask, 'umap_y'],
+                       c=colors[theory], label=f"{theory} (n={mask.sum()})",
+                       alpha=alpha, s=size, edgecolors='white', linewidth=0.5)
+
+    plt.xlabel('UMAP Dimension 1', fontsize=12)
+    plt.ylabel('UMAP Dimension 2', fontsize=12)
+    plt.title('Semantic Space of Consciousness Research by Theory', fontsize=14)
+    plt.legend(loc='upper right', fontsize=10)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, "8_semantic_space.png"), dpi=300, bbox_inches='tight')
+    plt.close()
     print("  ✅ Saved: 8_semantic_space.png")
-    centroids = {t: np.mean(X[valid_df['theory'] == t], axis=0) for t in ['IIT', 'GNWT', 'HOT', 'RPT', 'Neutral'] if (valid_df['theory'] == t).sum()}
-    return {"valid_df": valid_df, "centroids": centroids, "X": X}
+
+    # Calculate centroids
+    centroids = {}
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT', 'Neutral']:
+        mask = valid_df['theory'] == theory
+        if mask.sum() >= 3:
+            centroids[theory] = np.mean(X[mask], axis=0)
+
+    return {"valid_df": valid_df, "centroids": centroids, "X": X, "X_2d": X_2d}
 
 # =============================================================================
-# CELL 9: HYPOTHESIS TESTING
+# CELL 11: HYPOTHESIS TESTING
 # =============================================================================
 
 def run_hypothesis_tests(df: pd.DataFrame, centroids: Dict, X: np.ndarray, output_folder: str) -> Dict:
     print(f"\n{'='*60}\n🔬 HYPOTHESIS TESTING\n{'='*60}")
     results = {}
 
-    # A: Implicit Bias
-    print("\n📊 HYPOTHESIS A: Implicit Bias")
+    # A: Implicit Bias - Are neutral papers closer to IIT or GNWT?
+    print("\n📊 HYPOTHESIS A: Implicit Bias in 'Neutral' Papers")
     if 'IIT' in centroids and 'GNWT' in centroids:
-        neutral = X[df['theory'] == 'Neutral']
-        if len(neutral) > 10:
-            d_iit = [euclidean(e, centroids['IIT']) for e in neutral]
-            d_gnwt = [euclidean(e, centroids['GNWT']) for e in neutral]
-            t, p = stats.ttest_rel(d_iit, d_gnwt)
-            closer = "IIT" if np.mean(d_iit) < np.mean(d_gnwt) else "GNWT"
-            print(f"  Neutral papers closer to: {closer} | t={t:.3f}, p={p:.4f} {'✅' if p < 0.05 else '❌'}")
-            results['hyp_a'] = {'closer': closer, 'p': p, 'sig': p < 0.05}
+        neutral_mask = df['theory'] == 'Neutral'
+        neutral_embeddings = X[neutral_mask]
 
-    # B: Schism
-    print("\n📊 HYPOTHESIS B: The Schism")
+        if len(neutral_embeddings) > 10:
+            dist_to_iit = [euclidean(e, centroids['IIT']) for e in neutral_embeddings]
+            dist_to_gnwt = [euclidean(e, centroids['GNWT']) for e in neutral_embeddings]
+
+            t_stat, p_val = stats.ttest_rel(dist_to_iit, dist_to_gnwt)
+            closer_to = "IIT" if np.mean(dist_to_iit) < np.mean(dist_to_gnwt) else "GNWT"
+
+            print(f"  Mean distance to IIT: {np.mean(dist_to_iit):.4f}")
+            print(f"  Mean distance to GNWT: {np.mean(dist_to_gnwt):.4f}")
+            print(f"  Neutral papers closer to: {closer_to}")
+            print(f"  Paired t-test: t={t_stat:.3f}, p={p_val:.4f} {'✅ SIGNIFICANT' if p_val < 0.05 else '❌ Not significant'}")
+
+            results['hypothesis_a'] = {
+                'closer_to': closer_to,
+                'mean_dist_iit': float(np.mean(dist_to_iit)),
+                'mean_dist_gnwt': float(np.mean(dist_to_gnwt)),
+                't_statistic': float(t_stat),
+                'p_value': float(p_val),
+                'significant': p_val < 0.05
+            }
+
+    # B: The Schism - Is IIT-GNWT distance increasing over time?
+    print("\n📊 HYPOTHESIS B: The Schism (IIT-GNWT Divergence)")
     if 'IIT' in centroids and 'GNWT' in centroids:
-        pre, post = df[df['Year'] < SCHISM_YEAR], df[df['Year'] >= SCHISM_YEAR]
-        def cdist(subset, t1, t2):
-            m1, m2 = (df['theory'] == t1) & df.index.isin(subset.index), (df['theory'] == t2) & df.index.isin(subset.index)
-            if m1.sum() < 3 or m2.sum() < 3: return None
-            return euclidean(np.mean(X[m1], axis=0), np.mean(X[m2], axis=0))
-        d_pre, d_post = cdist(pre, 'IIT', 'GNWT'), cdist(post, 'IIT', 'GNWT')
-        if d_pre and d_post:
-            direction = "DIVERGING" if d_post > d_pre else "CONVERGING"
-            print(f"  Pre-2015: {d_pre:.4f} | Post-2015: {d_post:.4f} | {direction}")
-            results['hyp_b'] = {'d_pre': d_pre, 'd_post': d_post, 'direction': direction}
+        pre_2015 = df[df['Year'] < SCHISM_YEAR]
+        post_2015 = df[df['Year'] >= SCHISM_YEAR]
 
-    # C: Insularity
-    print("\n📊 HYPOTHESIS C: Insularity")
+        def get_centroid_distance(subset, theory1, theory2):
+            mask1 = (df['theory'] == theory1) & df.index.isin(subset.index)
+            mask2 = (df['theory'] == theory2) & df.index.isin(subset.index)
+            if mask1.sum() < 3 or mask2.sum() < 3:
+                return None
+            c1 = np.mean(X[mask1], axis=0)
+            c2 = np.mean(X[mask2], axis=0)
+            return euclidean(c1, c2)
+
+        dist_pre = get_centroid_distance(pre_2015, 'IIT', 'GNWT')
+        dist_post = get_centroid_distance(post_2015, 'IIT', 'GNWT')
+
+        if dist_pre is not None and dist_post is not None:
+            change = (dist_post - dist_pre) / dist_pre * 100
+            direction = "DIVERGING" if dist_post > dist_pre else "CONVERGING"
+
+            print(f"  IIT-GNWT distance pre-2015: {dist_pre:.4f}")
+            print(f"  IIT-GNWT distance post-2015: {dist_post:.4f}")
+            print(f"  Change: {change:+.1f}% ({direction})")
+
+            results['hypothesis_b'] = {
+                'distance_pre_2015': float(dist_pre),
+                'distance_post_2015': float(dist_post),
+                'percent_change': float(change),
+                'direction': direction
+            }
+
+    # C: Insularity - Which theory has the tightest cluster?
+    print("\n📊 HYPOTHESIS C: Cluster Insularity")
     densities = {}
-    for t in ['IIT', 'GNWT', 'HOT', 'RPT']:
-        if t in centroids:
-            te = X[df['theory'] == t]
-            if len(te) >= 5:
-                d = [euclidean(e, centroids[t]) for e in te]
-                densities[t] = {'n': len(te), 'mean': np.mean(d), 'std': np.std(d)}
-                print(f"  {t}: n={len(te)}, mean_dist={np.mean(d):.4f}")
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+        if theory in centroids:
+            theory_mask = df['theory'] == theory
+            theory_embeddings = X[theory_mask]
+            if len(theory_embeddings) >= 5:
+                distances = [euclidean(e, centroids[theory]) for e in theory_embeddings]
+                densities[theory] = {
+                    'n': len(theory_embeddings),
+                    'mean_distance': float(np.mean(distances)),
+                    'std_distance': float(np.std(distances))
+                }
+                print(f"  {theory}: n={len(theory_embeddings)}, mean_dist={np.mean(distances):.4f} ± {np.std(distances):.4f}")
+
     if densities:
-        most = min(densities, key=lambda x: densities[x]['mean'])
-        print(f"  Most insular: {most}")
-        results['hyp_c'] = {'most_insular': most, 'densities': densities}
+        most_insular = min(densities, key=lambda x: densities[x]['mean_distance'])
+        least_insular = max(densities, key=lambda x: densities[x]['mean_distance'])
+        print(f"  Most insular (tightest cluster): {most_insular}")
+        print(f"  Least insular (loosest cluster): {least_insular}")
+
+        results['hypothesis_c'] = {
+            'most_insular': most_insular,
+            'least_insular': least_insular,
+            'densities': densities
+        }
+
+        # Plot cluster density
         if MATPLOTLIB_AVAILABLE:
             plt.figure(figsize=(10, 6))
-            plt.bar(densities.keys(), [densities[t]['mean'] for t in densities],
-                   yerr=[densities[t]['std'] for t in densities], capsize=5,
-                   color=['#E63946', '#457B9D', '#2A9D8F', '#E9C46A'][:len(densities)])
-            plt.ylabel('Mean Distance to Centroid'); plt.title('Cluster Density (Lower = More Insular)')
-            plt.savefig(os.path.join(output_folder, "9_cluster_density.png"), dpi=300); plt.close()
+            theories = list(densities.keys())
+            means = [densities[t]['mean_distance'] for t in theories]
+            stds = [densities[t]['std_distance'] for t in theories]
+            colors = ['#E63946', '#457B9D', '#2A9D8F', '#E9C46A'][:len(theories)]
+
+            bars = plt.bar(theories, means, yerr=stds, capsize=5, color=colors, edgecolor='black', linewidth=1.5)
+            plt.ylabel('Mean Distance to Centroid', fontsize=12)
+            plt.title('Cluster Density by Theory (Lower = More Insular)', fontsize=14)
+
+            # Add value labels
+            for bar, mean in zip(bars, means):
+                plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                        f'{mean:.3f}', ha='center', va='bottom', fontsize=10)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_folder, "9_cluster_density.png"), dpi=300, bbox_inches='tight')
+            plt.close()
             print("  ✅ Saved: 9_cluster_density.png")
+
     return results
 
 # =============================================================================
-# CELL 10: RULE-BASED FALLBACK
+# CELL 12: VOCABULARY DIVERGENCE (ECHO CHAMBER ANALYSIS)
 # =============================================================================
 
-class RuleBasedExtractor:
-    FINGERPRINTS = {
-        'IIT': ['integrated information', 'phi', 'tononi', 'cause-effect', 'posterior hot zone', 'maximally irreducible'],
-        'GNWT': ['global workspace', 'dehaene', 'baars', 'ignition', 'broadcasting', 'p3b', 'fronto-parietal'],
-        'HOT': ['higher-order', 'rosenthal', 'metacognition', 'awareness of awareness', 'lau'],
-        'RPT': ['recurrent processing', 'lamme', 'local recurrence', 'feedforward sweep']
-    }
-    RPT_EXCLUSIONS = ['prefrontal feedback', 'top-down attention', 'global workspace']
+def run_vocabulary_divergence(df: pd.DataFrame, embeddings: List, output_folder: str) -> Dict:
+    """
+    Test if IIT is becoming an 'echo chamber' by measuring semantic distance
+    from 'General Neuroscience' (Neutral papers) over time.
+    """
+    print(f"\n{'='*60}\n📚 VOCABULARY DIVERGENCE ANALYSIS (Echo Chamber Test)\n{'='*60}")
 
-    def extract(self, abstract: str) -> Dict:
-        if pd.isna(abstract): return self._default()
-        text = ' ' + abstract.lower() + ' '
-        scores = {t: sum(1 for k in kws if k in text) for t, kws in self.FINGERPRINTS.items()}
-        if scores.get('RPT', 0) > 0:
-            for ex in self.RPT_EXCLUSIONS:
-                if ex in text: scores['RPT'] = max(0, scores['RPT'] - 2)
-        theory = max(scores, key=scores.get) if max(scores.values()) > 0 else "Neutral"
-        return {"theory": theory, "paradigm": "Report", "type": "Content", "epistemic": "Post-Hoc",
-                "anatomy": [], "tone": "Neutral", "target": "Function", "subject": "Human",
-                "confidence": min(max(scores.values()) / 3, 1), "fingerprints_found": []}
+    if not MATPLOTLIB_AVAILABLE:
+        return {"error": "matplotlib not available"}
 
-    def _default(self): return {"theory": "Neutral", "paradigm": "Report", "type": "Content",
-                                "epistemic": "Post-Hoc", "anatomy": [], "tone": "Neutral",
-                                "target": "Function", "subject": "Human", "confidence": 0, "fingerprints_found": []}
+    valid_mask = [e is not None for e in embeddings]
+    valid_embeddings = [e for e in embeddings if e is not None]
 
-    def batch_extract(self, df: pd.DataFrame) -> pd.DataFrame:
-        print(f"\n{'='*60}\n📝 RULE-BASED EXTRACTION\n{'='*60}")
-        results = [self.extract(row['Abstract']) for _, row in tqdm(df.iterrows(), total=len(df))]
-        df_out = df.copy()
-        for k in results[0].keys(): df_out[k] = [r[k] for r in results]
-        for t, c in df_out['theory'].value_counts().items(): print(f"   {t}: {c}")
-        return df_out
+    if len(valid_embeddings) < 100:
+        return {"error": "Insufficient embeddings"}
 
-# =============================================================================
-# CELL 11-17: ANALYSES 1-7
-# =============================================================================
+    X = np.vstack(valid_embeddings)
+    valid_df = df[valid_mask].copy().reset_index(drop=True)
 
-def run_contrast_audit(df, out):
-    print(f"\n{'='*60}\n📊 ANALYSIS 1: CONTRAST\n{'='*60}")
-    dft = df[df['theory'] != 'Neutral'].copy()
-    if len(dft) < 20: return {"error": "Insufficient"}
-    le_p, le_t, le_th = LabelEncoder(), LabelEncoder(), LabelEncoder()
-    dft['p'], dft['t'], dft['th'] = le_p.fit_transform(dft['paradigm']), le_t.fit_transform(dft['type']), le_th.fit_transform(dft['theory'])
-    rf = RandomForestClassifier(n_estimators=100, random_state=42)
-    cv = cross_val_score(rf, dft[['p', 't']], dft['th'], cv=min(5, len(set(dft['th']))))
-    print(f"  CV Accuracy: {cv.mean():.3f}")
-    rf.fit(dft[['p', 't']], dft['th'])
-    cts = dft.groupby(['paradigm', 'theory']).size().reset_index(name='c')
-    pars, ths = dft['paradigm'].unique().tolist(), dft['theory'].unique().tolist()
-    fig = go.Figure(go.Sankey(node=dict(label=pars+ths), link=dict(
-        source=[pars.index(r['paradigm']) for _, r in cts.iterrows()],
-        target=[len(pars)+ths.index(r['theory']) for _, r in cts.iterrows()],
-        value=cts['c'].tolist())))
-    fig.update_layout(title=f"ConTraSt (Acc: {cv.mean():.1%})"); fig.write_image(os.path.join(out, "1_contrast.png"), scale=2)
-    print("  ✅ Saved: 1_contrast.png")
-    return {"acc": cv.mean()}
+    # Time periods
+    periods = [
+        (2000, 2010, "2000-2010"),
+        (2010, 2015, "2010-2015"),
+        (2015, 2020, "2015-2020"),
+        (2020, 2026, "2020-2025")
+    ]
 
-def run_moving_goalposts(df, out):
-    print(f"\n{'='*60}\n📈 ANALYSIS 2: GOALPOSTS\n{'='*60}")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    dft = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
-    dft['txt'] = dft['Abstract'].apply(lambda x: extract_first_sentences(x, 2))
+    results = {'periods': {}, 'divergence_trends': {}}
+
+    # Calculate centroid for "General Neuroscience" (Neutral papers)
+    neutral_mask = valid_df['theory'] == 'Neutral'
+    if neutral_mask.sum() < 10:
+        print("  ⚠️ Insufficient neutral papers for baseline")
+        return {"error": "Insufficient neutral papers"}
+
+    general_centroid = np.mean(X[neutral_mask], axis=0)
+    print(f"  General Neuroscience baseline: {neutral_mask.sum()} papers")
+
+    theories = ['IIT', 'GNWT', 'HOT', 'RPT']
+    divergence_data = {t: [] for t in theories}
+
+    for start, end, label in periods:
+        period_mask = (valid_df['Year'] >= start) & (valid_df['Year'] < end)
+        results['periods'][label] = {}
+
+        for theory in theories:
+            theory_period_mask = period_mask & (valid_df['theory'] == theory)
+            n_papers = theory_period_mask.sum()
+
+            if n_papers >= 3:
+                theory_centroid = np.mean(X[theory_period_mask], axis=0)
+                distance = euclidean(theory_centroid, general_centroid)
+                divergence_data[theory].append({'period': label, 'distance': distance, 'n': n_papers})
+                results['periods'][label][theory] = {'distance': float(distance), 'n': n_papers}
+                print(f"  {label} | {theory}: distance={distance:.4f} (n={n_papers})")
+
+    # Calculate trends
+    print(f"\n📈 Divergence Trends:")
+    for theory in theories:
+        if len(divergence_data[theory]) >= 2:
+            distances = [d['distance'] for d in divergence_data[theory]]
+            first, last = distances[0], distances[-1]
+            change = (last - first) / first * 100 if first > 0 else 0
+            trend = "↑ DIVERGING" if change > 10 else "↓ CONVERGING" if change < -10 else "→ STABLE"
+            results['divergence_trends'][theory] = {
+                'first_distance': float(first),
+                'last_distance': float(last),
+                'percent_change': float(change),
+                'trend': trend
+            }
+            print(f"  {theory}: {first:.4f} → {last:.4f} ({change:+.1f}%) {trend}")
+
+    # Plot divergence over time
+    plt.figure(figsize=(12, 6))
     colors = {'IIT': '#E63946', 'GNWT': '#457B9D', 'HOT': '#2A9D8F', 'RPT': '#E9C46A'}
-    fig = go.Figure()
-    for t in ['IIT', 'GNWT', 'HOT', 'RPT']:
-        tdf = dft[dft['theory'] == t]
-        if len(tdf) < 3: continue
-        emb_yr = {y: model.encode(tdf[tdf['Year']==y]['txt'].tolist()) for y in range(MIN_YEAR, MAX_YEAR+1) if len(tdf[tdf['Year']==y]) > 0}
-        if not emb_yr: continue
-        yrs = sorted(emb_yr.keys()); base = BASELINE_YEAR if BASELINE_YEAR in yrs else yrs[0]
-        drift = [{"y": y, "d": cosine(np.mean(emb_yr[base], 0), np.mean(emb_yr[y], 0))} for y in yrs]
-        td = pd.DataFrame(drift)
-        fig.add_trace(go.Scatter(x=td['y'], y=td['d'], mode='lines+markers', name=t, line=dict(color=colors[t])))
-    fig.update_layout(title="Moving Goalposts", xaxis_title="Year", yaxis_title="Drift")
-    fig.write_image(os.path.join(out, "2_goalposts.png"), scale=2)
-    print("  ✅ Saved: 2_goalposts.png")
-    return {}
 
-def run_adversarial(df, out):
-    print(f"\n{'='*60}\n⚔️ ANALYSIS 3: ADVERSARIAL\n{'='*60}")
-    pats = {'IIT': r'\b(integrated information|iit\b|tononi)', 'GNWT': r'\b(global.?workspace|gnw|dehaene)',
-            'HOT': r'\b(higher.?order|rosenthal)', 'RPT': r'\b(recurrent processing|lamme)'}
-    df['adv'] = df['Abstract'].apply(lambda x: len([t for t, p in pats.items() if re.search(p, str(x).lower())]) >= 2)
-    yearly = df.groupby('Year').agg(tot=('Title', 'count'), adv=('adv', 'sum')).reset_index()
-    yearly['pct'] = yearly['adv'] / yearly['tot'] * 100
-    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
-    z = np.polyfit(yearly['Year'], yearly['pct'], 1)
-    fig = go.Figure([go.Bar(x=yearly['Year'], y=yearly['pct']), go.Scatter(x=yearly['Year'], y=np.poly1d(z)(yearly['Year']), mode='lines')])
-    fig.update_layout(title=f"Adversarial Index (Trend: {'↑' if z[0]>0 else '↓'})")
-    fig.write_image(os.path.join(out, "3_adversarial.png"), scale=2)
-    print(f"  ✅ Saved: 3_adversarial.png | Total: {df['adv'].sum()}")
-    return {"total": int(df['adv'].sum())}
+    for theory in theories:
+        if divergence_data[theory]:
+            periods_plot = [d['period'] for d in divergence_data[theory]]
+            distances = [d['distance'] for d in divergence_data[theory]]
+            plt.plot(periods_plot, distances, marker='o', markersize=10, linewidth=2,
+                    label=theory, color=colors[theory])
 
-def run_cartography(df, out):
-    print(f"\n{'='*60}\n🧠 ANALYSIS 4: CARTOGRAPHY\n{'='*60}")
-    dft = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
-    if len(dft) < 10: return {"error": "Insufficient"}
-    rc = defaultdict(lambda: defaultdict(int))
-    for _, r in dft.iterrows():
-        for a in (r.get('anatomy', []) or []):
-            if a and str(a).lower() != 'none': rc[r['theory']][str(a).upper()] += 1
-    allr = Counter(); [allr.update(v) for v in rc.values()]
-    top = [r for r, _ in allr.most_common(15)]
-    if not top: return {"error": "No regions"}
-    mat = [[rc[t].get(r, 0) for r in top] for t in ['IIT', 'GNWT', 'HOT', 'RPT']]
-    mat = [[x/max(sum(row),1)*100 for x in row] for row in mat]
-    fig = go.Figure(go.Heatmap(z=mat, x=top, y=['IIT', 'GNWT', 'HOT', 'RPT'], colorscale='Reds'))
-    fig.update_layout(title="Neuro-Cartography"); fig.write_image(os.path.join(out, "4_cartography.png"), scale=2)
-    print("  ✅ Saved: 4_cartography.png")
-    return {}
+    plt.xlabel('Time Period', fontsize=12)
+    plt.ylabel('Semantic Distance from General Neuroscience', fontsize=12)
+    plt.title('Vocabulary Divergence Over Time\n(Higher = More "Echo Chamber")', fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, "11_vocabulary_divergence.png"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  ✅ Saved: 11_vocabulary_divergence.png")
 
-def run_aggression(df, out):
-    print(f"\n{'='*60}\n😤 ANALYSIS 5: AGGRESSION\n{'='*60}")
-    dft = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
-    if len(dft) < 10: return {"error": "Insufficient"}
-    yearly = dft.groupby('Year').apply(lambda x: ((x['tone']=='Dismissive')|(x['tone']=='Critical')).sum()/len(x)*100).reset_index(name='pct')
-    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
-    if len(yearly) < 3: return {"error": "Insufficient"}
-    z = np.polyfit(yearly['Year'], yearly['pct'], 1)
-    fig = go.Figure([go.Scatter(x=yearly['Year'], y=yearly['pct'], mode='lines+markers'),
-                     go.Scatter(x=yearly['Year'], y=np.poly1d(z)(yearly['Year']), mode='lines', line=dict(dash='dash'))])
-    fig.update_layout(title=f"Aggression Index (Trend: {'↑' if z[0]>0 else '↓'})")
-    fig.write_image(os.path.join(out, "5_aggression.png"), scale=2)
-    print("  ✅ Saved: 5_aggression.png")
-    return {}
-
-def run_easy_hard(df, out):
-    print(f"\n{'='*60}\n🤔 ANALYSIS 6: EASY VS HARD\n{'='*60}")
-    dft = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
-    if len(dft) < 10: return {"error": "Insufficient"}
-    cts = dft.groupby(['theory', 'target']).size().unstack(fill_value=0)
-    for c in ['Phenomenology', 'Function', 'Mechanism']:
-        if c not in cts.columns: cts[c] = 0
-    pct = cts.div(cts.sum(1), 0) * 100
-    fig = go.Figure([go.Bar(x=pct.index, y=pct[t], name=t) for t in ['Phenomenology', 'Function', 'Mechanism']])
-    fig.update_layout(title="Easy vs Hard", barmode='stack'); fig.write_image(os.path.join(out, "6_easy_hard.png"), scale=2)
-    print("  ✅ Saved: 6_easy_hard.png")
-    return {}
-
-def run_organism(df, out):
-    print(f"\n{'='*60}\n🐁 ANALYSIS 7: ORGANISM\n{'='*60}")
-    dft = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
-    if len(dft) < 10: return {"error": "Insufficient"}
-    cts = dft.groupby(['theory', 'subject']).size().unstack(fill_value=0)
-    pct = cts.div(cts.sum(1), 0) * 100
-    fig = go.Figure([go.Bar(x=pct.index, y=pct.get(s, [0]*len(pct)), name=s) for s in ['Human', 'Clinical', 'Animal', 'Simulation', 'Review'] if s in pct.columns])
-    fig.update_layout(title="Model Organism", barmode='stack'); fig.write_image(os.path.join(out, "7_organism.png"), scale=2)
-    print("  ✅ Saved: 7_organism.png")
-    return {}
+    return results
 
 # =============================================================================
-# CELL 18: MAIN PIPELINE
+# CELL 13: DOGMATISM ANALYSIS
 # =============================================================================
 
-def run_full_audit(csv_path=CSV_PATH, api_key=GEMINI_API_KEY, output_folder=OUTPUT_FOLDER,
-                   use_llm=True, use_rules_only=False, run_embeddings=True):
-    print(f"\n{'='*70}\n    🧠 CONSCIOUSNESS WARS AUDIT v3.0 🧠\n{'='*70}")
-    os.makedirs(output_folder, exist_ok=True)
-    df = load_bibliography(csv_path)
+def run_dogmatism_analysis(df: pd.DataFrame, output_folder: str) -> Dict:
+    """
+    Analyze dogmatism/epistemic confidence by theory.
+    """
+    print(f"\n{'='*60}\n🎯 DOGMATISM ANALYSIS\n{'='*60}")
 
-    if use_rules_only:
-        df_c = RuleBasedExtractor().batch_extract(df)
-    elif use_llm and api_key:
-        try:
-            ext = GeminiExtractor(api_key, GEMINI_MODEL)
-            test = ext.extract_single("Integrated information theory and phi measures.", 0)
-            print(f"✅ Gemini connected | Test: {test['theory']}")
-            df_c = ext.batch_extract_parallel(df, MAX_WORKERS)
-        except Exception as e:
-            print(f"⚠️ Gemini failed: {e}\nFalling back to rules...")
-            df_c = RuleBasedExtractor().batch_extract(df)
-    else:
-        df_c = RuleBasedExtractor().batch_extract(df)
+    if not MATPLOTLIB_AVAILABLE:
+        return {"error": "matplotlib not available"}
 
     results = {}
-    for name, fn in [('contrast', run_contrast_audit), ('goalposts', run_moving_goalposts),
-                     ('adversarial', run_adversarial), ('cartography', run_cartography),
-                     ('aggression', run_aggression), ('easy_hard', run_easy_hard), ('organism', run_organism)]:
-        try: results[name] = fn(df_c, output_folder)
-        except Exception as e: print(f"⚠️ {name} failed: {e}")
 
+    # Filter to theories only
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+
+    if len(theories_df) < 20:
+        print("  ⚠️ Insufficient theory-classified papers")
+        return {"error": "Insufficient data"}
+
+    # Calculate mean dogmatism by theory
+    dogmatism_by_theory = theories_df.groupby('theory')['dogmatism_score'].agg(['mean', 'std', 'count'])
+    print("\n📊 Dogmatism by Theory:")
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+        if theory in dogmatism_by_theory.index:
+            row = dogmatism_by_theory.loc[theory]
+            print(f"  {theory}: {row['mean']:.2f} ± {row['std']:.2f} (n={int(row['count'])})")
+            results[theory] = {
+                'mean': float(row['mean']),
+                'std': float(row['std']),
+                'n': int(row['count'])
+            }
+
+    # Statistical test: Is there significant difference?
+    theory_groups = [theories_df[theories_df['theory'] == t]['dogmatism_score'].values
+                     for t in ['IIT', 'GNWT', 'HOT', 'RPT']
+                     if len(theories_df[theories_df['theory'] == t]) >= 5]
+
+    if len(theory_groups) >= 2:
+        f_stat, p_val = stats.f_oneway(*theory_groups)
+        print(f"\n  ANOVA: F={f_stat:.3f}, p={p_val:.4f} {'✅ SIGNIFICANT' if p_val < 0.05 else '❌ Not significant'}")
+        results['anova'] = {'f_statistic': float(f_stat), 'p_value': float(p_val), 'significant': p_val < 0.05}
+
+    # Plot dogmatism by theory
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Bar plot
+    theories = ['IIT', 'GNWT', 'HOT', 'RPT']
+    means = [dogmatism_by_theory.loc[t, 'mean'] if t in dogmatism_by_theory.index else 0 for t in theories]
+    stds = [dogmatism_by_theory.loc[t, 'std'] if t in dogmatism_by_theory.index else 0 for t in theories]
+    colors = ['#E63946', '#457B9D', '#2A9D8F', '#E9C46A']
+
+    bars = axes[0].bar(theories, means, yerr=stds, capsize=5, color=colors, edgecolor='black', linewidth=1.5)
+    axes[0].set_ylabel('Mean Dogmatism Score (1-10)', fontsize=11)
+    axes[0].set_title('Epistemic Confidence by Theory', fontsize=12)
+    axes[0].set_ylim(1, 10)
+    axes[0].axhline(y=5, color='gray', linestyle='--', alpha=0.5, label='Baseline (neutral)')
+
+    for bar, mean in zip(bars, means):
+        if mean > 0:
+            axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
+                        f'{mean:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    # Box plot
+    box_data = [theories_df[theories_df['theory'] == t]['dogmatism_score'].values for t in theories]
+    bp = axes[1].boxplot(box_data, labels=theories, patch_artist=True)
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    axes[1].set_ylabel('Dogmatism Score Distribution', fontsize=11)
+    axes[1].set_title('Dogmatism Distribution by Theory', fontsize=12)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_folder, "12_dogmatism_analysis.png"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  ✅ Saved: 12_dogmatism_analysis.png")
+
+    # Dogmatism over time
+    yearly_dogmatism = theories_df.groupby(['Year', 'theory'])['dogmatism_score'].mean().unstack(fill_value=np.nan)
+    yearly_dogmatism = yearly_dogmatism[(yearly_dogmatism.index >= MIN_YEAR) & (yearly_dogmatism.index <= MAX_YEAR)]
+
+    if len(yearly_dogmatism) > 3:
+        plt.figure(figsize=(12, 6))
+        for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+            if theory in yearly_dogmatism.columns:
+                data = yearly_dogmatism[theory].dropna()
+                if len(data) > 2:
+                    plt.plot(data.index, data.values, marker='o', label=theory,
+                            color=colors[theories.index(theory)], linewidth=2, markersize=6)
+
+        plt.xlabel('Year', fontsize=12)
+        plt.ylabel('Mean Dogmatism Score', fontsize=12)
+        plt.title('Epistemic Confidence Over Time by Theory', fontsize=14)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder, "12b_dogmatism_over_time.png"), dpi=300, bbox_inches='tight')
+        plt.close()
+        print("  ✅ Saved: 12b_dogmatism_over_time.png")
+
+    return results
+
+# =============================================================================
+# CELL 14: METHODOLOGY PREDICTS THEORY (Yaron et al. 2022)
+# =============================================================================
+
+def run_methodology_predicts_theory(df: pd.DataFrame, output_folder: str) -> Dict:
+    """
+    Replicate Yaron et al. (2022) ConTraSt finding: methodology choices predict theory.
+    Uses Random Forest to predict theory from paradigm, type, and subject.
+    """
+    print(f"\n{'='*60}\n🔬 METHODOLOGY PREDICTS THEORY (Yaron et al. 2022)\n{'='*60}")
+
+    # Filter to classified theories
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+
+    if len(theories_df) < 50:
+        print("  ⚠️ Insufficient theory-classified papers")
+        return {"error": "Insufficient data"}
+
+    # Encode features
+    le_paradigm = LabelEncoder()
+    le_type = LabelEncoder()
+    le_subject = LabelEncoder()
+    le_target = LabelEncoder()
+    le_theory = LabelEncoder()
+
+    theories_df['paradigm_enc'] = le_paradigm.fit_transform(theories_df['paradigm'])
+    theories_df['type_enc'] = le_type.fit_transform(theories_df['type'])
+    theories_df['subject_enc'] = le_subject.fit_transform(theories_df['subject'])
+    theories_df['target_enc'] = le_target.fit_transform(theories_df['target'])
+    theories_df['theory_enc'] = le_theory.fit_transform(theories_df['theory'])
+
+    # Features and target
+    feature_cols = ['paradigm_enc', 'type_enc', 'subject_enc', 'target_enc']
+    X = theories_df[feature_cols].values
+    y = theories_df['theory_enc'].values
+
+    # Random Forest with cross-validation
+    rf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+    cv_scores = cross_val_score(rf, X, y, cv=5, scoring='accuracy')
+
+    print(f"  Cross-validation accuracy: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+
+    # Fit full model for feature importances
+    rf.fit(X, y)
+
+    feature_names = ['Paradigm', 'Type', 'Subject', 'Target']
+    importances = rf.feature_importances_
+
+    print("\n  Feature Importances:")
+    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+        print(f"    {name}: {imp:.3f}")
+
+    results = {
+        'cv_accuracy_mean': float(cv_scores.mean()),
+        'cv_accuracy_std': float(cv_scores.std()),
+        'feature_importances': dict(zip(feature_names, [float(i) for i in importances])),
+        'n_samples': len(theories_df)
+    }
+
+    # Confusion matrix
+    y_pred = rf.predict(X)
+    cm = confusion_matrix(y, y_pred)
+    theory_labels = le_theory.classes_
+
+    if MATPLOTLIB_AVAILABLE:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Feature importance bar plot
+        sorted_idx = np.argsort(importances)[::-1]
+        axes[0].barh([feature_names[i] for i in sorted_idx],
+                    [importances[i] for i in sorted_idx],
+                    color=['#E63946', '#457B9D', '#2A9D8F', '#E9C46A'])
+        axes[0].set_xlabel('Feature Importance', fontsize=11)
+        axes[0].set_title(f'Methodology Predicts Theory\n(CV Accuracy: {cv_scores.mean():.1%})', fontsize=12)
+
+        # Confusion matrix heatmap
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=theory_labels, yticklabels=theory_labels, ax=axes[1])
+        axes[1].set_xlabel('Predicted', fontsize=11)
+        axes[1].set_ylabel('Actual', fontsize=11)
+        axes[1].set_title('Confusion Matrix', fontsize=12)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder, "10_methodology_predicts_theory.png"), dpi=300, bbox_inches='tight')
+        plt.close()
+        print("  ✅ Saved: 10_methodology_predicts_theory.png")
+
+    # Detailed crosstabs
+    print("\n  Paradigm × Theory crosstab:")
+    ct_paradigm = pd.crosstab(theories_df['theory'], theories_df['paradigm'], normalize='index') * 100
+    print(ct_paradigm.round(1).to_string())
+
+    results['crosstab_paradigm'] = ct_paradigm.to_dict()
+
+    return results
+
+# =============================================================================
+# CELL 15: ANALYSES 1-7 (IMPROVED)
+# =============================================================================
+
+def run_contrast_audit(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 1: ConTraSt Sankey diagram."""
+    print(f"\n{'='*60}\n📊 ANALYSIS 1: CONTRAST SANKEY\n{'='*60}")
+
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+    if len(theories_df) < 20:
+        print("  ⚠️ Insufficient data")
+        return {"error": "Insufficient data"}
+
+    # Sankey: Paradigm -> Theory
+    counts = theories_df.groupby(['paradigm', 'theory']).size().reset_index(name='count')
+
+    paradigms = theories_df['paradigm'].unique().tolist()
+    theories = theories_df['theory'].unique().tolist()
+    all_labels = paradigms + theories
+
+    source_idx = [paradigms.index(r['paradigm']) for _, r in counts.iterrows()]
+    target_idx = [len(paradigms) + theories.index(r['theory']) for _, r in counts.iterrows()]
+
+    colors_source = ['#888888'] * len(paradigms)
+    colors_target = ['#E63946', '#457B9D', '#2A9D8F', '#E9C46A'][:len(theories)]
+
+    fig = go.Figure(go.Sankey(
+        node=dict(
+            pad=15, thickness=20,
+            label=all_labels,
+            color=colors_source + colors_target
+        ),
+        link=dict(
+            source=source_idx,
+            target=target_idx,
+            value=counts['count'].tolist()
+        )
+    ))
+
+    fig.update_layout(title="ConTraSt: Paradigm → Theory Flow", font_size=12)
+    fig.write_image(os.path.join(output_folder, "1_contrast.png"), scale=2)
+    print("  ✅ Saved: 1_contrast.png")
+
+    return {"n_papers": len(theories_df)}
+
+
+def run_moving_goalposts(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 2: Semantic drift over time."""
+    print(f"\n{'='*60}\n📈 ANALYSIS 2: MOVING GOALPOSTS\n{'='*60}")
+
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])].copy()
+    theories_df['text'] = theories_df['Abstract'].apply(lambda x: extract_first_sentences(x, 3))
+
+    colors = {'IIT': '#E63946', 'GNWT': '#457B9D', 'HOT': '#2A9D8F', 'RPT': '#E9C46A'}
+    fig = go.Figure()
+
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+        theory_df = theories_df[theories_df['theory'] == theory]
+        if len(theory_df) < 5:
+            continue
+
+        # Get embeddings by year
+        yearly_embeddings = {}
+        for year in range(MIN_YEAR, MAX_YEAR + 1):
+            year_texts = theory_df[theory_df['Year'] == year]['text'].tolist()
+            if len(year_texts) >= 2:
+                yearly_embeddings[year] = model.encode(year_texts)
+
+        if len(yearly_embeddings) < 3:
+            continue
+
+        years = sorted(yearly_embeddings.keys())
+        baseline_year = BASELINE_YEAR if BASELINE_YEAR in years else years[0]
+        baseline_emb = np.mean(yearly_embeddings[baseline_year], axis=0)
+
+        drift_data = []
+        for year in years:
+            year_centroid = np.mean(yearly_embeddings[year], axis=0)
+            drift = cosine(baseline_emb, year_centroid)
+            drift_data.append({'year': year, 'drift': drift})
+
+        drift_df = pd.DataFrame(drift_data)
+        fig.add_trace(go.Scatter(
+            x=drift_df['year'], y=drift_df['drift'],
+            mode='lines+markers', name=theory,
+            line=dict(color=colors[theory], width=2),
+            marker=dict(size=8)
+        ))
+
+    fig.update_layout(
+        title=f"Semantic Drift from {BASELINE_YEAR} Baseline",
+        xaxis_title="Year", yaxis_title="Cosine Distance from Baseline",
+        legend=dict(x=0.02, y=0.98)
+    )
+    fig.write_image(os.path.join(output_folder, "2_goalposts.png"), scale=2)
+    print("  ✅ Saved: 2_goalposts.png")
+
+    return {}
+
+
+def run_adversarial(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 3: Cross-theory engagement (adversarial index)."""
+    print(f"\n{'='*60}\n⚔️ ANALYSIS 3: ADVERSARIAL INDEX\n{'='*60}")
+
+    patterns = {
+        'IIT': r'\b(integrated information|iit\b|tononi|phi\b)',
+        'GNWT': r'\b(global.?workspace|gnw\b|dehaene|baars)',
+        'HOT': r'\b(higher.?order|rosenthal|hot\b)',
+        'RPT': r'\b(recurrent processing|lamme|rpt\b)'
+    }
+
+    def count_theories(abstract):
+        if pd.isna(abstract):
+            return 0
+        text = str(abstract).lower()
+        return sum(1 for p in patterns.values() if re.search(p, text))
+
+    df['theories_mentioned'] = df['Abstract'].apply(count_theories)
+    df['adversarial'] = df['theories_mentioned'] >= 2
+
+    yearly = df.groupby('Year').agg(
+        total=('Title', 'count'),
+        adversarial=('adversarial', 'sum')
+    ).reset_index()
+    yearly['pct'] = yearly['adversarial'] / yearly['total'] * 100
+    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
+
+    if len(yearly) < 3:
+        return {"error": "Insufficient data"}
+
+    z = np.polyfit(yearly['Year'], yearly['pct'], 1)
+    trend = "↑ INCREASING" if z[0] > 0.1 else "↓ DECREASING" if z[0] < -0.1 else "→ STABLE"
+
+    print(f"  Total adversarial papers: {df['adversarial'].sum()}")
+    print(f"  Trend: {trend} ({z[0]:.3f}%/year)")
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=yearly['Year'], y=yearly['pct'], name='Adversarial %',
+                         marker_color='#E63946', opacity=0.7))
+    fig.add_trace(go.Scatter(x=yearly['Year'], y=np.poly1d(z)(yearly['Year']),
+                             mode='lines', name='Trend', line=dict(color='black', dash='dash', width=2)))
+
+    fig.update_layout(title=f"Adversarial Index (Trend: {trend})",
+                     xaxis_title="Year", yaxis_title="% Papers Mentioning 2+ Theories")
+    fig.write_image(os.path.join(output_folder, "3_adversarial.png"), scale=2)
+    print("  ✅ Saved: 3_adversarial.png")
+
+    return {"total_adversarial": int(df['adversarial'].sum()), "trend_slope": float(z[0])}
+
+
+def run_cartography(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 4: Brain region preferences by theory."""
+    print(f"\n{'='*60}\n🧠 ANALYSIS 4: NEURO-CARTOGRAPHY\n{'='*60}")
+
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
+    if len(theories_df) < 10:
+        return {"error": "Insufficient data"}
+
+    region_counts = defaultdict(lambda: defaultdict(int))
+    for _, row in theories_df.iterrows():
+        anatomy = row.get('anatomy', [])
+        if isinstance(anatomy, list):
+            for region in anatomy:
+                if region and str(region).lower() not in ['none', 'null', '']:
+                    region_counts[row['theory']][str(region).upper()] += 1
+
+    # Get top regions
+    all_regions = Counter()
+    for theory_regions in region_counts.values():
+        all_regions.update(theory_regions)
+
+    top_regions = [r for r, _ in all_regions.most_common(15)]
+
+    if not top_regions:
+        print("  ⚠️ No brain regions extracted")
+        return {"error": "No regions found"}
+
+    # Build matrix
+    matrix = []
+    for theory in ['IIT', 'GNWT', 'HOT', 'RPT']:
+        row = [region_counts[theory].get(r, 0) for r in top_regions]
+        total = sum(row)
+        row = [x / total * 100 if total > 0 else 0 for x in row]
+        matrix.append(row)
+
+    fig = go.Figure(go.Heatmap(
+        z=matrix, x=top_regions, y=['IIT', 'GNWT', 'HOT', 'RPT'],
+        colorscale='RdBu', reversescale=True
+    ))
+    fig.update_layout(title="Neuro-Cartography: Brain Regions by Theory")
+    fig.write_image(os.path.join(output_folder, "4_cartography.png"), scale=2)
+    print("  ✅ Saved: 4_cartography.png")
+
+    return {}
+
+
+def run_aggression(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 5: Hostile tone over time."""
+    print(f"\n{'='*60}\n😤 ANALYSIS 5: AGGRESSION INDEX\n{'='*60}")
+
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
+    if len(theories_df) < 10:
+        return {"error": "Insufficient data"}
+
+    # Calculate aggressive tone percentage
+    def is_aggressive(tone):
+        return tone in ['Dismissive', 'Critical']
+
+    theories_df = theories_df.copy()
+    theories_df['aggressive'] = theories_df['tone'].apply(is_aggressive)
+
+    yearly = theories_df.groupby('Year').agg(
+        total=('Title', 'count'),
+        aggressive=('aggressive', 'sum')
+    ).reset_index()
+    yearly['pct'] = yearly['aggressive'] / yearly['total'] * 100
+    yearly = yearly[(yearly['Year'] >= MIN_YEAR) & (yearly['Year'] <= MAX_YEAR)]
+
+    if len(yearly) < 3:
+        return {"error": "Insufficient data"}
+
+    # Trend
+    z = np.polyfit(yearly['Year'], yearly['pct'], 1)
+    trend = "↑ INCREASING" if z[0] > 0.1 else "↓ DECREASING" if z[0] < -0.1 else "→ STABLE"
+
+    print(f"  Aggressive papers: {theories_df['aggressive'].sum()} / {len(theories_df)}")
+    print(f"  Trend: {trend} ({z[0]:.3f}%/year)")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=yearly['Year'], y=yearly['pct'], mode='lines+markers',
+                             name='Aggression %', line=dict(color='#E63946', width=2)))
+    fig.add_trace(go.Scatter(x=yearly['Year'], y=np.poly1d(z)(yearly['Year']),
+                             mode='lines', name='Trend', line=dict(color='black', dash='dash')))
+
+    fig.update_layout(title=f"Aggression Index (Trend: {trend})",
+                     xaxis_title="Year", yaxis_title="% Papers with Critical/Dismissive Tone")
+    fig.write_image(os.path.join(output_folder, "5_aggression.png"), scale=2)
+    print("  ✅ Saved: 5_aggression.png")
+
+    return {"total_aggressive": int(theories_df['aggressive'].sum()), "trend": trend}
+
+
+def run_easy_hard(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 6: Easy vs Hard problem focus."""
+    print(f"\n{'='*60}\n🤔 ANALYSIS 6: EASY VS HARD PROBLEM\n{'='*60}")
+
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
+    if len(theories_df) < 10:
+        return {"error": "Insufficient data"}
+
+    crosstab = pd.crosstab(theories_df['theory'], theories_df['target'], normalize='index') * 100
+
+    for col in ['Phenomenology', 'Function', 'Mechanism']:
+        if col not in crosstab.columns:
+            crosstab[col] = 0
+
+    print("  Target focus by theory (%):")
+    print(crosstab[['Phenomenology', 'Function', 'Mechanism']].round(1).to_string())
+
+    fig = go.Figure()
+    colors = {'Phenomenology': '#E63946', 'Function': '#457B9D', 'Mechanism': '#2A9D8F'}
+
+    for target in ['Phenomenology', 'Function', 'Mechanism']:
+        fig.add_trace(go.Bar(
+            x=crosstab.index,
+            y=crosstab[target],
+            name=target,
+            marker_color=colors[target]
+        ))
+
+    fig.update_layout(
+        title="Easy vs Hard Problem: Target Focus by Theory",
+        xaxis_title="Theory", yaxis_title="% of Papers",
+        barmode='stack'
+    )
+    fig.write_image(os.path.join(output_folder, "6_easy_hard.png"), scale=2)
+    print("  ✅ Saved: 6_easy_hard.png")
+
+    return crosstab.to_dict()
+
+
+def run_organism(df: pd.DataFrame, output_folder: str) -> Dict:
+    """Analysis 7: Model organism preferences."""
+    print(f"\n{'='*60}\n🐁 ANALYSIS 7: MODEL ORGANISM\n{'='*60}")
+
+    theories_df = df[df['theory'].isin(['IIT', 'GNWT', 'HOT', 'RPT'])]
+    if len(theories_df) < 10:
+        return {"error": "Insufficient data"}
+
+    crosstab = pd.crosstab(theories_df['theory'], theories_df['subject'], normalize='index') * 100
+
+    print("  Subject by theory (%):")
+    print(crosstab.round(1).to_string())
+
+    fig = go.Figure()
+    colors = {'Human': '#457B9D', 'Clinical': '#E63946', 'Animal': '#2A9D8F',
+              'Simulation': '#E9C46A', 'Review': '#888888'}
+
+    for subject in ['Human', 'Clinical', 'Animal', 'Simulation', 'Review']:
+        if subject in crosstab.columns:
+            fig.add_trace(go.Bar(
+                x=crosstab.index,
+                y=crosstab[subject],
+                name=subject,
+                marker_color=colors.get(subject, '#888888')
+            ))
+
+    fig.update_layout(
+        title="Model Organism Preferences by Theory",
+        xaxis_title="Theory", yaxis_title="% of Papers",
+        barmode='stack'
+    )
+    fig.write_image(os.path.join(output_folder, "7_organism.png"), scale=2)
+    print("  ✅ Saved: 7_organism.png")
+
+    return crosstab.to_dict()
+
+# =============================================================================
+# CELL 16: MAIN PIPELINE
+# =============================================================================
+
+def run_full_audit(csv_path: str = CSV_PATH, api_key: str = GEMINI_API_KEY,
+                   output_folder: str = OUTPUT_FOLDER, use_llm: bool = True,
+                   use_rules_only: bool = False, run_embeddings: bool = True) -> Dict:
+    """
+    Run the full consciousness wars audit pipeline.
+    """
+    print(f"\n{'='*70}")
+    print("    🧠 CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT v4.0 🧠")
+    print(f"{'='*70}")
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Load data
+    df = load_bibliography(csv_path)
+
+    # Extract dimensions
+    if use_rules_only:
+        df_classified = RuleBasedExtractor().batch_extract(df)
+    elif use_llm and api_key:
+        try:
+            extractor = GeminiExtractor(api_key, GEMINI_MODEL)
+            # Test connection
+            test_result = extractor.extract_classification("Integrated information theory and phi measures.")
+            print(f"✅ Gemini API connected | Test: {test_result['theory']} (conf: {test_result['confidence']:.2f})")
+            df_classified = extractor.batch_extract_parallel(df, MAX_WORKERS)
+        except Exception as e:
+            print(f"⚠️ Gemini API failed: {e}")
+            print("Falling back to rule-based extraction...")
+            df_classified = RuleBasedExtractor().batch_extract(df)
+    else:
+        df_classified = RuleBasedExtractor().batch_extract(df)
+
+    results = {}
+
+    # Run analyses 1-7
+    analyses = [
+        ('1_contrast', run_contrast_audit),
+        ('2_goalposts', run_moving_goalposts),
+        ('3_adversarial', run_adversarial),
+        ('4_cartography', run_cartography),
+        ('5_aggression', run_aggression),
+        ('6_easy_hard', run_easy_hard),
+        ('7_organism', run_organism),
+    ]
+
+    for name, func in analyses:
+        try:
+            results[name] = func(df_classified, output_folder)
+        except Exception as e:
+            print(f"⚠️ {name} failed: {e}")
+            results[name] = {"error": str(e)}
+
+    # Run methodology predicts theory (Analysis 10)
+    try:
+        results['10_methodology'] = run_methodology_predicts_theory(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Methodology analysis failed: {e}")
+
+    # Run dogmatism analysis (Analysis 12)
+    try:
+        results['12_dogmatism'] = run_dogmatism_analysis(df_classified, output_folder)
+    except Exception as e:
+        print(f"⚠️ Dogmatism analysis failed: {e}")
+
+    # Run embedding-based analyses
     if run_embeddings and api_key:
         try:
-            embs = GeminiEmbedder(api_key, EMBEDDING_MODEL).embed_batch(df_c['Abstract'].tolist(), EMBEDDING_BATCH_SIZE)
-            clust = run_semantic_clustering(df_c, embs, output_folder)
-            if 'error' not in clust:
-                results['hyp'] = run_hypothesis_tests(clust['valid_df'], clust['centroids'], clust['X'], output_folder)
-        except Exception as e: print(f"⚠️ Clustering failed: {e}")
+            embedder = GeminiEmbedder(api_key, EMBEDDING_MODEL)
+            embeddings = embedder.embed_batch(df_classified['Abstract'].tolist(), EMBEDDING_BATCH_SIZE)
 
-    df_c.to_csv(os.path.join(output_folder, "classified_papers.csv"), index=False)
-    with open(os.path.join(output_folder, "results.json"), 'w') as f: json.dump(results, f, indent=2, default=str)
+            # Semantic clustering (Analysis 8)
+            cluster_result = run_semantic_clustering(df_classified, embeddings, output_folder)
 
-    print(f"\n{'='*70}\n    ✅ AUDIT COMPLETE\n{'='*70}")
-    print(f"Papers: {len(df_c)}")
-    for t, c in df_c['theory'].value_counts().items(): print(f"   {t}: {c} ({c/len(df_c)*100:.1f}%)")
-    print(f"📁 Results: {output_folder}")
-    return {'data': df_c, 'results': results}
+            if 'error' not in cluster_result:
+                # Hypothesis tests (Analysis 9)
+                results['9_hypothesis'] = run_hypothesis_tests(
+                    cluster_result['valid_df'],
+                    cluster_result['centroids'],
+                    cluster_result['X'],
+                    output_folder
+                )
+
+                # Vocabulary divergence (Analysis 11)
+                results['11_divergence'] = run_vocabulary_divergence(
+                    df_classified, embeddings, output_folder
+                )
+        except Exception as e:
+            print(f"⚠️ Embedding-based analyses failed: {e}")
+
+    # Save results
+    df_classified.to_csv(os.path.join(output_folder, "classified_papers.csv"), index=False)
+
+    with open(os.path.join(output_folder, "results.json"), 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+
+    # Final summary
+    print(f"\n{'='*70}")
+    print("    ✅ AUDIT COMPLETE")
+    print(f"{'='*70}")
+    print(f"Total papers processed: {len(df_classified)}")
+    print(f"\n📊 Final Theory Distribution:")
+    for theory, count in df_classified['theory'].value_counts().items():
+        print(f"   {theory}: {count} ({count/len(df_classified)*100:.1f}%)")
+
+    print(f"\n📊 Extraction Quality:")
+    failed = df_classified['_extraction_failed'].sum()
+    print(f"   Successful extractions: {len(df_classified) - failed} ({(1 - failed/len(df_classified))*100:.1f}%)")
+    print(f"   Mean confidence: {df_classified['confidence'].mean():.3f}")
+    print(f"   Mean dogmatism: {df_classified['dogmatism_score'].mean():.2f}")
+
+    print(f"\n📁 Results saved to: {output_folder}")
+
+    return {'data': df_classified, 'results': results}
+
 
 if __name__ == "__main__":
-    print("CONSCIOUSNESS WARS AUDIT v3.0\n\n1. Set GEMINI_API_KEY\n2. Run: results = run_full_audit()")
+    print("=" * 70)
+    print("CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT v4.0")
+    print("=" * 70)
+    print("\n1. Set your GEMINI_API_KEY in the configuration section")
+    print("2. Run: results = run_full_audit()")
+    print("\nOr with custom settings:")
+    print("   results = run_full_audit(csv_path='your_data.csv', output_folder='./output')")
