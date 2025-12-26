@@ -1,6 +1,6 @@
 """
 ================================================================================
-CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE v5.0
+CONSCIOUSNESS WARS BIBLIOMETRIC AUDIT PIPELINE v5.1
 ================================================================================
 A comprehensive bibliometric analysis of consciousness theories:
 IIT (Integrated Information Theory), GNWT (Global Neuronal Workspace Theory),
@@ -118,6 +118,7 @@ except ImportError:
 try:
     from bertopic import BERTopic
     from bertopic.representation import KeyBERTInspired
+    from sklearn.feature_extraction.text import CountVectorizer
     BERTOPIC_AVAILABLE = True
 except ImportError:
     BERTOPIC_AVAILABLE = False
@@ -294,11 +295,13 @@ class GeminiExtractor:
             return None, f"ERROR_{str(e)[:30]}"
 
     def _parse_json(self, text: str) -> Optional[Dict]:
-        """Parse JSON from response text."""
+        """Parse JSON from response text with robust extraction."""
         if not text:
             return None
 
-        # Clean markdown
+        original_text = text
+
+        # Clean markdown code blocks
         text = text.strip()
         text = re.sub(r'^```(?:json)?\s*\n?', '', text)
         text = re.sub(r'\n?```\s*$', '', text)
@@ -330,6 +333,54 @@ class GeminiExtractor:
                             break
         except:
             pass
+
+        # Try fixing common JSON issues
+        try:
+            # Find JSON portion and clean it
+            match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                # Fix single quotes to double quotes
+                json_str = re.sub(r"'([^']+)':", r'"\1":', json_str)
+                json_str = re.sub(r":\s*'([^']*)'", r': "\1"', json_str)
+                # Fix trailing commas
+                json_str = re.sub(r',\s*}', '}', json_str)
+                json_str = re.sub(r',\s*]', ']', json_str)
+                result = json.loads(json_str)
+                if isinstance(result, dict):
+                    return result
+        except:
+            pass
+
+        # Last resort: extract key-value pairs manually
+        try:
+            result = {}
+            # Extract theory
+            theory_match = re.search(r'"?theory"?\s*[:\s]+["\']?(IIT|GNWT|HOT|RPT|Neutral)["\']?', text, re.I)
+            if theory_match:
+                result['theory'] = theory_match.group(1).upper()
+            # Extract confidence
+            conf_match = re.search(r'"?confidence"?\s*[:\s]+([0-9.]+)', text, re.I)
+            if conf_match:
+                result['confidence'] = float(conf_match.group(1))
+            # Extract paradigm
+            para_match = re.search(r'"?paradigm"?\s*[:\s]+["\']?(Report|No-Report)["\']?', text, re.I)
+            if para_match:
+                result['paradigm'] = para_match.group(1)
+            # Extract tone
+            tone_match = re.search(r'"?tone"?\s*[:\s]+["\']?(Neutral|Critical|Dismissive|Constructive)["\']?', text, re.I)
+            if tone_match:
+                result['tone'] = tone_match.group(1)
+
+            if result and 'theory' in result:
+                if DEBUG_MODE and len(self.debug_responses) < 3:
+                    print(f"    [DEBUG] Regex extraction: {result}")
+                return result
+        except:
+            pass
+
+        if DEBUG_MODE:
+            print(f"    [DEBUG] JSON parse failed. Raw text: {original_text[:200]}...")
 
         return None
 
@@ -571,14 +622,26 @@ class GeminiExtractor:
         if use_debate:
             print("⚡ Using Multi-Persona Debate: Proponent → Skeptic → Judge")
 
-        # Test extraction
+        # Test extraction with verbose output
         print("\n🧪 Testing extraction...")
-        test_result = self.extract_single(df.iloc[0]['Abstract'], 0, use_debate=False)
-        print(f"   Test: theory={test_result.get('theory', 'N/A')}, conf={test_result.get('confidence', 0):.2f}")
+        test_abstract = df.iloc[0]['Abstract']
+        print(f"   Test abstract: {str(test_abstract)[:100]}...")
+
+        # Direct API test to see raw response
+        test_prompt = SIMPLE_CLASSIFICATION_PROMPT.format(abstract=str(test_abstract)[:1500])
+        raw_text, status = self._call_api(test_prompt, temperature=0.1)
+        print(f"   API status: {status}")
+        if raw_text:
+            print(f"   Raw response: {raw_text[:300]}...")
+            parsed = self._parse_json(raw_text)
+            print(f"   Parsed: {parsed}")
+
+        test_result = self.extract_single(test_abstract, 0, use_debate=False)
+        print(f"   Test result: theory={test_result.get('theory', 'N/A')}, conf={test_result.get('confidence', 0):.2f}")
 
         if test_result.get('_extraction_failed', True):
-            print("   ⚠️ Test failed - check API connection")
-            return None
+            print("   ⚠️ Test failed - JSON parsing issue")
+            print("   Continuing with rule-based fallback for failed extractions...")
         else:
             print("   ✅ Test succeeded!")
 
@@ -626,23 +689,43 @@ class GeminiExtractor:
 
     def extract_arguments(self, abstract: str) -> Dict:
         """Extract argumentative structure from abstract."""
+        default = {"main_claim": "", "premises": [], "theoretical_relations": [], "argument_strength": "weak"}
+
         if pd.isna(abstract) or len(str(abstract)) < 50:
-            return {"main_claim": "", "premises": [], "theoretical_relations": [], "argument_strength": "weak"}
+            return default
 
         prompt = ARGUMENT_MINING_PROMPT.format(abstract=str(abstract)[:2500])
-        text, status = self._call_api(prompt, temperature=0.2)
+        text, status = self._call_api(prompt, temperature=0.2, max_tokens=800)
 
         if status == "OK" and text:
             parsed = self._parse_json(text)
             if parsed:
-                return {
+                result = {
                     "main_claim": parsed.get("main_claim", ""),
                     "premises": parsed.get("premises", []),
                     "theoretical_relations": parsed.get("theoretical_relations", []),
                     "argument_strength": parsed.get("argument_strength", "weak")
                 }
+                return result
 
-        return {"main_claim": "", "premises": [], "theoretical_relations": [], "argument_strength": "weak"}
+            # Fallback: try to extract main_claim with regex
+            claim_match = re.search(r'"?main_claim"?\s*[:\s]+["\']?([^"\'{}]+)["\']?', text, re.I)
+            if claim_match:
+                result = default.copy()
+                result["main_claim"] = claim_match.group(1).strip()[:200]
+
+                # Try to extract relations
+                relations = []
+                for match in re.finditer(r'(SUPPORTS?|ATTACKS?)\s+(IIT|GNWT|HOT|RPT)', text, re.I):
+                    relations.append({
+                        "relation": "SUPPORTS" if "SUPPORT" in match.group(1).upper() else "ATTACKS",
+                        "theory": match.group(2).upper(),
+                        "reason": ""
+                    })
+                result["theoretical_relations"] = relations
+                return result
+
+        return default
 
 
 # =============================================================================
@@ -650,17 +733,44 @@ class GeminiExtractor:
 # =============================================================================
 
 class RuleBasedExtractor:
-    """Fast rule-based classification using keywords."""
+    """Fast rule-based classification using keywords with weighted scoring."""
 
+    # Weighted fingerprints: (keyword, weight) - higher weight = more specific
     FINGERPRINTS = {
-        'IIT': ['integrated information', 'phi', 'tononi', 'cause-effect', 'posterior hot zone',
-                'maximally irreducible', 'exclusion postulate', 'intrinsic causal'],
-        'GNWT': ['global workspace', 'dehaene', 'baars', 'ignition', 'broadcasting', 'p3b', 'p300',
-                 'fronto-parietal', 'access consciousness', 'prefrontal'],
-        'HOT': ['higher-order', 'rosenthal', 'metacognition', 'meta-cognition', 'awareness of awareness',
-                'lau', 'second-order'],
-        'RPT': ['recurrent processing', 'lamme', 'local recurrence', 'feedforward sweep',
-                'reentrant', 're-entrant', 'fahrenfort']
+        'IIT': [
+            ('integrated information theory', 3), ('integrated information', 2),
+            ('phi', 1), ('tononi', 3), ('cause-effect repertoire', 3),
+            ('posterior hot zone', 2), ('maximally irreducible', 3),
+            ('exclusion postulate', 3), ('intrinsic causal power', 3),
+            ('iit', 2), ('cerebral cortex consciousness', 1)
+        ],
+        'GNWT': [
+            ('global neuronal workspace', 3), ('global workspace theory', 3),
+            ('global workspace', 2), ('dehaene', 3), ('baars', 3),
+            ('ignition', 2), ('broadcasting', 1), ('p3b', 2), ('p300', 1),
+            ('fronto-parietal', 2), ('access consciousness', 2),
+            ('prefrontal cortex', 1), ('gnw', 2)
+        ],
+        'HOT': [
+            ('higher-order thought', 3), ('higher-order theory', 3),
+            ('higher-order', 2), ('rosenthal', 3), ('lau hakwan', 3),
+            ('metacognition', 2), ('meta-cognition', 2),
+            ('awareness of awareness', 3), ('second-order', 2),
+            ('prefrontal metacognition', 2)
+        ],
+        'RPT': [
+            ('recurrent processing theory', 3), ('recurrent processing', 2),
+            ('lamme', 3), ('local recurrence', 3), ('feedforward sweep', 2),
+            ('reentrant processing', 2), ('re-entrant', 2), ('fahrenfort', 3),
+            ('visual cortex recurrence', 3), ('v1 feedback', 2)
+        ]
+    }
+
+    # Exclusion patterns that reduce scores
+    EXCLUSIONS = {
+        'RPT': ['prefrontal cortex', 'global workspace', 'frontal'],
+        'IIT': ['global workspace', 'gnw'],
+        'GNWT': ['integrated information', 'posterior hot zone']
     }
 
     def extract(self, abstract: str) -> Dict:
@@ -668,15 +778,28 @@ class RuleBasedExtractor:
             return self._default()
 
         text = ' ' + str(abstract).lower() + ' '
-        scores = {t: sum(1 for k in kws if k in text) for t, kws in self.FINGERPRINTS.items()}
 
-        # RPT exclusion
-        if scores.get('RPT', 0) > 0:
-            if any(x in text for x in ['prefrontal', 'global workspace']):
-                scores['RPT'] = max(0, scores['RPT'] - 2)
+        # Calculate weighted scores
+        scores = {}
+        for theory, patterns in self.FINGERPRINTS.items():
+            score = sum(weight for keyword, weight in patterns if keyword in text)
+            scores[theory] = score
 
-        theory = max(scores, key=scores.get) if max(scores.values()) > 0 else "Neutral"
-        confidence = min(max(scores.values()) / 3, 1.0) if max(scores.values()) > 0 else 0.0
+        # Apply exclusions
+        for theory, exclusions in self.EXCLUSIONS.items():
+            if scores.get(theory, 0) > 0:
+                for excl in exclusions:
+                    if excl in text:
+                        scores[theory] = max(0, scores[theory] - 2)
+
+        # Require minimum score threshold
+        max_score = max(scores.values()) if scores else 0
+        if max_score >= 2:  # Require at least 2 points
+            theory = max(scores, key=scores.get)
+            confidence = min(max_score / 5, 1.0)
+        else:
+            theory = "Neutral"
+            confidence = 0.0
 
         # Paradigm
         paradigm = "No-Report" if any(x in text for x in ['no-report', 'implicit', 'no report']) else "Report"
@@ -809,12 +932,26 @@ def run_bertopic_analysis(df: pd.DataFrame, output_folder: str) -> Dict:
     print(f"Documents: {len(docs)}")
 
     try:
-        # Create BERTopic model
+        # Create BERTopic model with proper stopword removal
         print("Creating BERTopic model...")
+
+        # Custom vectorizer with stopwords removed and scientific terms preserved
+        vectorizer_model = CountVectorizer(
+            stop_words='english',
+            min_df=5,
+            max_df=0.95,
+            ngram_range=(1, 2)
+        )
+
+        # Use KeyBERTInspired for better topic representations
+        representation_model = KeyBERTInspired()
+
         topic_model = BERTopic(
             language="english",
             min_topic_size=15,
             nr_topics="auto",
+            vectorizer_model=vectorizer_model,
+            representation_model=representation_model,
             verbose=True
         )
 
